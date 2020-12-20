@@ -247,14 +247,13 @@ static int nv3_iterate(nv3_fifo_info *res_info, nv3_sim_state * state, nv3_arb_i
     int mburst_size = 32;
     int mmisses, gmisses, vmisses;
     int misses;
-    int vlwm, glwm, mlwm;
+    int vlwm, glwm;
     int last, next, cur;
     int max_gfsize ;
     long ns;
 
     vlwm = 0;
     glwm = 0;
-    mlwm = 0;
     vfsize = 0;
     gfsize = 0;
     cur = ainfo->cur;
@@ -656,13 +655,12 @@ static void nv4CalcArbitration
     nv4_sim_state *arb
 )
 {
-    int data, pagemiss, cas,width, video_enable, color_key_enable, bpp, align;
+    int data, pagemiss, cas,width, video_enable, bpp;
     int nvclks, mclks, pclks, vpagemiss, crtpagemiss, vbs;
     int found, mclk_extra, mclk_loop, cbs, m1, p1;
     int mclk_freq, pclk_freq, nvclk_freq, mp_enable;
     int us_m, us_n, us_p, video_drain_rate, crtc_drain_rate;
     int vpm_us, us_video, vlwm, video_fill_us, cpm_us, us_crt,clwm;
-    int craw, vraw;
 
     fifo->valid = 1;
     pclk_freq = arb->pclk_khz;
@@ -672,9 +670,7 @@ static void nv4CalcArbitration
     cas = arb->mem_latency;
     width = arb->memory_width >> 6;
     video_enable = arb->enable_video;
-    color_key_enable = arb->gr_during_vid;
     bpp = arb->pix_bpp;
-    align = arb->mem_aligned;
     mp_enable = arb->enable_mp;
     clwm = 0;
     vlwm = 0;
@@ -782,8 +778,6 @@ static void nv4CalcArbitration
                 mclk_extra--;
             }
         }
-        craw = clwm;
-        vraw = vlwm;
         if (clwm < 384) clwm = 384;
         if (vlwm < 128) vlwm = 128;
         data = (int)(clwm);
@@ -842,7 +836,7 @@ static void nv10CalcArbitration
     nv10_sim_state *arb
 )
 {
-    int data, pagemiss, cas,width, video_enable, color_key_enable, bpp, align;
+    int data, pagemiss, cas,width, video_enable, bpp;
     int nvclks, mclks, pclks, vpagemiss, crtpagemiss, vbs;
     int nvclk_fill, us_extra;
     int found, mclk_extra, mclk_loop, cbs, m1;
@@ -863,9 +857,7 @@ static void nv10CalcArbitration
     cas = arb->mem_latency;
     width = arb->memory_width/64;
     video_enable = arb->enable_video;
-    color_key_enable = arb->gr_during_vid;
     bpp = arb->pix_bpp;
-    align = arb->mem_aligned;
     mp_enable = arb->enable_mp;
     clwm = 0;
     vlwm = 1024;
@@ -1108,7 +1100,8 @@ static void nForceUpdateArbitrationSettings
     unsigned      pixelDepth,
     unsigned     *burst,
     unsigned     *lwm,
-    RIVA_HW_INST *chip
+    RIVA_HW_INST *chip,
+    struct pci_dev *pdev
 )
 {
     nv10_fifo_info fifo_data;
@@ -1116,8 +1109,9 @@ static void nForceUpdateArbitrationSettings
     unsigned int M, N, P, pll, MClk, NVClk;
     unsigned int uMClkPostDiv;
     struct pci_dev *dev;
+    int domain = pci_domain_nr(pdev->bus);
 
-    dev = pci_get_bus_and_slot(0, 3);
+    dev = pci_get_domain_bus_and_slot(domain, 0, 3);
     pci_read_config_dword(dev, 0x6C, &uMClkPostDiv);
     pci_dev_put(dev);
     uMClkPostDiv = (uMClkPostDiv >> 8) & 0xf;
@@ -1132,7 +1126,7 @@ static void nForceUpdateArbitrationSettings
     sim_data.enable_video   = 0;
     sim_data.enable_mp      = 0;
 
-    dev = pci_get_bus_and_slot(0, 1);
+    dev = pci_get_domain_bus_and_slot(domain, 0, 1);
     pci_read_config_dword(dev, 0x7C, &sim_data.memory_type);
     pci_dev_put(dev);
     sim_data.memory_type    = (sim_data.memory_type >> 12) & 1;
@@ -1234,6 +1228,7 @@ int CalcStateExt
 (
     RIVA_HW_INST  *chip,
     RIVA_HW_STATE *state,
+    struct pci_dev *pdev,
     int            bpp,
     int            width,
     int            hDisplaySize,
@@ -1242,8 +1237,7 @@ int CalcStateExt
 )
 {
     int pixelDepth;
-    int uninitialized_var(VClk),uninitialized_var(m),
-        uninitialized_var(n),	uninitialized_var(p);
+    int VClk, m, n, p;
 
     /*
      * Save mode parameters.
@@ -1300,7 +1294,7 @@ int CalcStateExt
                                           pixelDepth * 8,
                                          &(state->arbitration0),
                                          &(state->arbitration1),
-                                          chip);
+                                          chip, pdev);
             } else {
                 nv10UpdateArbitrationSettings(VClk, 
                                           pixelDepth * 8, 
@@ -1340,24 +1334,6 @@ int CalcStateExt
 /*
  * Load fixed function state and pre-calculated/stored state.
  */
-#if 0
-#define LOAD_FIXED_STATE(tbl,dev)                                       \
-    for (i = 0; i < sizeof(tbl##Table##dev)/8; i++)                 \
-        chip->dev[tbl##Table##dev[i][0]] = tbl##Table##dev[i][1]
-#define LOAD_FIXED_STATE_8BPP(tbl,dev)                                  \
-    for (i = 0; i < sizeof(tbl##Table##dev##_8BPP)/8; i++)            \
-        chip->dev[tbl##Table##dev##_8BPP[i][0]] = tbl##Table##dev##_8BPP[i][1]
-#define LOAD_FIXED_STATE_15BPP(tbl,dev)                                 \
-    for (i = 0; i < sizeof(tbl##Table##dev##_15BPP)/8; i++)           \
-        chip->dev[tbl##Table##dev##_15BPP[i][0]] = tbl##Table##dev##_15BPP[i][1]
-#define LOAD_FIXED_STATE_16BPP(tbl,dev)                                 \
-    for (i = 0; i < sizeof(tbl##Table##dev##_16BPP)/8; i++)           \
-        chip->dev[tbl##Table##dev##_16BPP[i][0]] = tbl##Table##dev##_16BPP[i][1]
-#define LOAD_FIXED_STATE_32BPP(tbl,dev)                                 \
-    for (i = 0; i < sizeof(tbl##Table##dev##_32BPP)/8; i++)           \
-        chip->dev[tbl##Table##dev##_32BPP[i][0]] = tbl##Table##dev##_32BPP[i][1]
-#endif
-
 #define LOAD_FIXED_STATE(tbl,dev)                                       \
     for (i = 0; i < sizeof(tbl##Table##dev)/8; i++)                 \
         NV_WR32(&chip->dev[tbl##Table##dev[i][0]], 0, tbl##Table##dev[i][1])
@@ -2102,10 +2078,12 @@ static void nv4GetConfig
 static void nv10GetConfig
 (
     RIVA_HW_INST *chip,
+    struct pci_dev *pdev,
     unsigned int chipset
 )
 {
     struct pci_dev* dev;
+    int domain = pci_domain_nr(pdev->bus);
     u32 amt;
 
 #ifdef __BIG_ENDIAN
@@ -2118,12 +2096,12 @@ static void nv10GetConfig
      * Fill in chip configuration.
      */
     if(chipset == NV_CHIP_IGEFORCE2) {
-        dev = pci_get_bus_and_slot(0, 1);
+        dev = pci_get_domain_bus_and_slot(domain, 0, 1);
         pci_read_config_dword(dev, 0x7C, &amt);
         pci_dev_put(dev);
         chip->RamAmountKBytes = (((amt >> 6) & 31) + 1) * 1024;
     } else if(chipset == NV_CHIP_0x01F0) {
-        dev = pci_get_bus_and_slot(0, 1);
+        dev = pci_get_domain_bus_and_slot(domain, 0, 1);
         pci_read_config_dword(dev, 0x84, &amt);
         pci_dev_put(dev);
         chip->RamAmountKBytes = (((amt >> 4) & 127) + 1) * 1024;
@@ -2224,6 +2202,7 @@ static void nv10GetConfig
 int RivaGetConfig
 (
     RIVA_HW_INST *chip,
+    struct pci_dev *pdev,
     unsigned int chipset
 )
 {
@@ -2245,7 +2224,7 @@ int RivaGetConfig
         case NV_ARCH_10:
         case NV_ARCH_20:
         case NV_ARCH_30:
-            nv10GetConfig(chip, chipset);
+            nv10GetConfig(chip, pdev, chipset);
             break;
         default:
             return (-1);

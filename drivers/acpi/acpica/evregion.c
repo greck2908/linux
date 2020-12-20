@@ -1,45 +1,11 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
 /******************************************************************************
  *
  * Module Name: evregion - Operation Region support
  *
+ * Copyright (C) 2000 - 2020, Intel Corp.
+ *
  *****************************************************************************/
-
-/*
- * Copyright (C) 2000 - 2017, Intel Corp.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
 
 #include <acpi/acpi.h>
 #include "accommon.h"
@@ -55,7 +21,8 @@ extern u8 acpi_gbl_default_address_spaces[];
 /* Local prototypes */
 
 static void
-acpi_ev_orphan_ec_reg_method(struct acpi_namespace_node *ec_device_node);
+acpi_ev_execute_orphan_reg_method(struct acpi_namespace_node *device_node,
+				  acpi_adr_space_type space_id);
 
 static acpi_status
 acpi_ev_reg_run(acpi_handle obj_handle,
@@ -284,7 +251,7 @@ acpi_ev_address_space_dispatch(union acpi_operand_object *region_obj,
 		/*
 		 * For handlers other than the default (supplied) handlers, we must
 		 * exit the interpreter because the handler *might* block -- we don't
-		 * know what it will do, so we can't hold the lock on the intepreter.
+		 * know what it will do, so we can't hold the lock on the interpreter.
 		 */
 		acpi_ex_exit_interpreter();
 	}
@@ -298,6 +265,16 @@ acpi_ev_address_space_dispatch(union acpi_operand_object *region_obj,
 		ACPI_EXCEPTION((AE_INFO, status, "Returned by Handler for [%s]",
 				acpi_ut_get_region_name(region_obj->region.
 							space_id)));
+
+		/*
+		 * Special case for an EC timeout. These are seen so frequently
+		 * that an additional error message is helpful
+		 */
+		if ((region_obj->region.space_id == ACPI_ADR_SPACE_EC) &&
+		    (status == AE_TIME)) {
+			ACPI_ERROR((AE_INFO,
+				    "Timeout from EC hardware or EC device driver"));
+		}
 	}
 
 	if (!(handler_desc->address_space.handler_flags &
@@ -677,6 +654,19 @@ acpi_ev_execute_reg_methods(struct acpi_namespace_node *node,
 
 	ACPI_FUNCTION_TRACE(ev_execute_reg_methods);
 
+	/*
+	 * These address spaces do not need a call to _REG, since the ACPI
+	 * specification defines them as: "must always be accessible". Since
+	 * they never change state (never become unavailable), no need to ever
+	 * call _REG on them. Also, a data_table is not a "real" address space,
+	 * so do not call _REG. September 2018.
+	 */
+	if ((space_id == ACPI_ADR_SPACE_SYSTEM_MEMORY) ||
+	    (space_id == ACPI_ADR_SPACE_SYSTEM_IO) ||
+	    (space_id == ACPI_ADR_SPACE_DATA_TABLE)) {
+		return_VOID;
+	}
+
 	info.space_id = space_id;
 	info.function = function;
 	info.reg_run_count = 0;
@@ -695,10 +685,12 @@ acpi_ev_execute_reg_methods(struct acpi_namespace_node *node,
 				     ACPI_NS_WALK_UNLOCK, acpi_ev_reg_run, NULL,
 				     &info, NULL);
 
-	/* Special case for EC: handle "orphan" _REG methods with no region */
-
-	if (space_id == ACPI_ADR_SPACE_EC) {
-		acpi_ev_orphan_ec_reg_method(node);
+	/*
+	 * Special case for EC and GPIO: handle "orphan" _REG methods with
+	 * no region.
+	 */
+	if (space_id == ACPI_ADR_SPACE_EC || space_id == ACPI_ADR_SPACE_GPIO) {
+		acpi_ev_execute_orphan_reg_method(node, space_id);
 	}
 
 	ACPI_DEBUG_PRINT_RAW((ACPI_DB_NAMES,
@@ -738,8 +730,8 @@ acpi_ev_reg_run(acpi_handle obj_handle,
 	}
 
 	/*
-	 * We only care about regions.and objects that are allowed to have address
-	 * space handlers
+	 * We only care about regions and objects that are allowed to have
+	 * address space handlers
 	 */
 	if ((node->type != ACPI_TYPE_REGION) && (node != acpi_gbl_root_node)) {
 		return (AE_OK);
@@ -771,31 +763,28 @@ acpi_ev_reg_run(acpi_handle obj_handle,
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ev_orphan_ec_reg_method
+ * FUNCTION:    acpi_ev_execute_orphan_reg_method
  *
- * PARAMETERS:  ec_device_node      - Namespace node for an EC device
+ * PARAMETERS:  device_node         - Namespace node for an ACPI device
+ *              space_id            - The address space ID
  *
  * RETURN:      None
  *
- * DESCRIPTION: Execute an "orphan" _REG method that appears under the EC
+ * DESCRIPTION: Execute an "orphan" _REG method that appears under an ACPI
  *              device. This is a _REG method that has no corresponding region
- *              within the EC device scope. The orphan _REG method appears to
- *              have been enabled by the description of the ECDT in the ACPI
- *              specification: "The availability of the region space can be
- *              detected by providing a _REG method object underneath the
- *              Embedded Controller device."
- *
- *              To quickly access the EC device, we use the ec_device_node used
- *              during EC handler installation. Otherwise, we would need to
- *              perform a time consuming namespace walk, executing _HID
- *              methods to find the EC device.
+ *              within the device's scope. ACPI tables depending on these
+ *              "orphan" _REG methods have been seen for both EC and GPIO
+ *              Operation Regions. Presumably the Windows ACPI implementation
+ *              always calls the _REG method independent of the presence of
+ *              an actual Operation Region with the correct address space ID.
  *
  *  MUTEX:      Assumes the namespace is locked
  *
  ******************************************************************************/
 
 static void
-acpi_ev_orphan_ec_reg_method(struct acpi_namespace_node *ec_device_node)
+acpi_ev_execute_orphan_reg_method(struct acpi_namespace_node *device_node,
+				  acpi_adr_space_type space_id)
 {
 	acpi_handle reg_method;
 	struct acpi_namespace_node *next_node;
@@ -803,9 +792,9 @@ acpi_ev_orphan_ec_reg_method(struct acpi_namespace_node *ec_device_node)
 	struct acpi_object_list args;
 	union acpi_object objects[2];
 
-	ACPI_FUNCTION_TRACE(ev_orphan_ec_reg_method);
+	ACPI_FUNCTION_TRACE(ev_execute_orphan_reg_method);
 
-	if (!ec_device_node) {
+	if (!device_node) {
 		return_VOID;
 	}
 
@@ -815,7 +804,7 @@ acpi_ev_orphan_ec_reg_method(struct acpi_namespace_node *ec_device_node)
 
 	/* Get a handle to a _REG method immediately under the EC device */
 
-	status = acpi_get_handle(ec_device_node, METHOD_NAME__REG, &reg_method);
+	status = acpi_get_handle(device_node, METHOD_NAME__REG, &reg_method);
 	if (ACPI_FAILURE(status)) {
 		goto exit;	/* There is no _REG method present */
 	}
@@ -827,31 +816,31 @@ acpi_ev_orphan_ec_reg_method(struct acpi_namespace_node *ec_device_node)
 	 * with other space IDs to be present; but the code below will then
 	 * execute the _REG method with the embedded_control space_ID argument.
 	 */
-	next_node = acpi_ns_get_next_node(ec_device_node, NULL);
+	next_node = acpi_ns_get_next_node(device_node, NULL);
 	while (next_node) {
 		if ((next_node->type == ACPI_TYPE_REGION) &&
 		    (next_node->object) &&
-		    (next_node->object->region.space_id == ACPI_ADR_SPACE_EC)) {
+		    (next_node->object->region.space_id == space_id)) {
 			goto exit;	/* Do not execute the _REG */
 		}
 
-		next_node = acpi_ns_get_next_node(ec_device_node, next_node);
+		next_node = acpi_ns_get_next_node(device_node, next_node);
 	}
 
-	/* Evaluate the _REG(embedded_control,Connect) method */
+	/* Evaluate the _REG(space_id,Connect) method */
 
 	args.count = 2;
 	args.pointer = objects;
 	objects[0].type = ACPI_TYPE_INTEGER;
-	objects[0].integer.value = ACPI_ADR_SPACE_EC;
+	objects[0].integer.value = space_id;
 	objects[1].type = ACPI_TYPE_INTEGER;
 	objects[1].integer.value = ACPI_REG_CONNECT;
 
-	status = acpi_evaluate_object(reg_method, NULL, &args, NULL);
+	(void)acpi_evaluate_object(reg_method, NULL, &args, NULL);
 
 exit:
 	/* We ignore all errors from above, don't care */
 
-	status = acpi_ut_acquire_mutex(ACPI_MTX_NAMESPACE);
+	(void)acpi_ut_acquire_mutex(ACPI_MTX_NAMESPACE);
 	return_VOID;
 }

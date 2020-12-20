@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * HT handling
  *
@@ -8,10 +9,7 @@
  * Copyright 2007, Michael Wu <flamingice@sourmilk.net>
  * Copyright 2007-2010, Intel Corporation
  * Copyright(c) 2015-2017 Intel Deutschland GmbH
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
+ * Copyright (C) 2018 - 2020 Intel Corporation
  */
 
 #include <linux/ieee80211.h>
@@ -97,10 +95,10 @@ static void ieee80211_send_addba_request(struct ieee80211_sub_if_data *sdata,
 	mgmt->u.action.u.addba_req.action_code = WLAN_ACTION_ADDBA_REQ;
 
 	mgmt->u.action.u.addba_req.dialog_token = dialog_token;
-	capab = (u16)(1 << 0);		/* bit 0 A-MSDU support */
-	capab |= (u16)(1 << 1);		/* bit 1 aggregation policy */
-	capab |= (u16)(tid << 2); 	/* bit 5:2 TID number */
-	capab |= (u16)(agg_size << 6);	/* bit 15:6 max size of aggergation */
+	capab = IEEE80211_ADDBA_PARAM_AMSDU_MASK;
+	capab |= IEEE80211_ADDBA_PARAM_POLICY_MASK;
+	capab |= u16_encode_bits(tid, IEEE80211_ADDBA_PARAM_TID_MASK);
+	capab |= u16_encode_bits(agg_size, IEEE80211_ADDBA_PARAM_BUF_SIZE_MASK);
 
 	mgmt->u.action.u.addba_req.capab = cpu_to_le16(capab);
 
@@ -228,7 +226,7 @@ ieee80211_agg_start_txq(struct sta_info *sta, int tid, bool enable)
 	clear_bit(IEEE80211_TXQ_STOP, &txqi->flags);
 	local_bh_disable();
 	rcu_read_lock();
-	drv_wake_tx_queue(sta->sdata->local, txqi);
+	schedule_and_wake_txq(sta->sdata->local, txqi);
 	rcu_read_unlock();
 	local_bh_enable();
 }
@@ -365,6 +363,8 @@ int ___ieee80211_stop_tx_ba_session(struct sta_info *sta, u16 tid,
 
 	set_bit(HT_AGG_STATE_STOPPING, &tid_tx->state);
 
+	ieee80211_agg_stop_txq(sta, tid);
+
 	spin_unlock_bh(&sta->lock);
 
 	ht_dbg(sta->sdata, "Tx BA session stop requested for %pM tid %u\n",
@@ -392,7 +392,8 @@ int ___ieee80211_stop_tx_ba_session(struct sta_info *sta, u16 tid,
 	 * telling the driver. New packets will not go through since
 	 * the aggregation session is no longer OPERATIONAL.
 	 */
-	synchronize_net();
+	if (!local->in_reconfig)
+		synchronize_net();
 
 	tid_tx->stop_initiator = reason == AGG_STOP_PEER_REQUEST ?
 					WLAN_BACK_RECIPIENT :
@@ -429,18 +430,12 @@ int ___ieee80211_stop_tx_ba_session(struct sta_info *sta, u16 tid,
  */
 static void sta_addba_resp_timer_expired(struct timer_list *t)
 {
-	struct tid_ampdu_tx *tid_tx_timer =
-		from_timer(tid_tx_timer, t, addba_resp_timer);
-	struct sta_info *sta = tid_tx_timer->sta;
-	u8 tid = tid_tx_timer->tid;
-	struct tid_ampdu_tx *tid_tx;
+	struct tid_ampdu_tx *tid_tx = from_timer(tid_tx, t, addba_resp_timer);
+	struct sta_info *sta = tid_tx->sta;
+	u8 tid = tid_tx->tid;
 
 	/* check if the TID waits for addBA response */
-	rcu_read_lock();
-	tid_tx = rcu_dereference(sta->ampdu_mlme.tid_tx[tid]);
-	if (!tid_tx ||
-	    test_bit(HT_AGG_STATE_RESPONSE_RECEIVED, &tid_tx->state)) {
-		rcu_read_unlock();
+	if (test_bit(HT_AGG_STATE_RESPONSE_RECEIVED, &tid_tx->state)) {
 		ht_dbg(sta->sdata,
 		       "timer expired on %pM tid %d not expecting addBA response\n",
 		       sta->sta.addr, tid);
@@ -451,7 +446,45 @@ static void sta_addba_resp_timer_expired(struct timer_list *t)
 	       sta->sta.addr, tid);
 
 	ieee80211_stop_tx_ba_session(&sta->sta, tid);
-	rcu_read_unlock();
+}
+
+static void ieee80211_send_addba_with_timeout(struct sta_info *sta,
+					      struct tid_ampdu_tx *tid_tx)
+{
+	struct ieee80211_sub_if_data *sdata = sta->sdata;
+	struct ieee80211_local *local = sta->local;
+	u8 tid = tid_tx->tid;
+	u16 buf_size;
+
+	/* activate the timer for the recipient's addBA response */
+	mod_timer(&tid_tx->addba_resp_timer, jiffies + ADDBA_RESP_INTERVAL);
+	ht_dbg(sdata, "activated addBA response timer on %pM tid %d\n",
+	       sta->sta.addr, tid);
+
+	spin_lock_bh(&sta->lock);
+	sta->ampdu_mlme.last_addba_req_time[tid] = jiffies;
+	sta->ampdu_mlme.addba_req_num[tid]++;
+	spin_unlock_bh(&sta->lock);
+
+	if (sta->sta.he_cap.has_he) {
+		buf_size = local->hw.max_tx_aggregation_subframes;
+	} else {
+		/*
+		 * We really should use what the driver told us it will
+		 * transmit as the maximum, but certain APs (e.g. the
+		 * LinkSys WRT120N with FW v1.0.07 build 002 Jun 18 2012)
+		 * will crash when we use a lower number.
+		 */
+		buf_size = IEEE80211_MAX_AMPDU_BUF_HT;
+	}
+
+	/* send AddBA request */
+	ieee80211_send_addba_request(sdata, sta->sta.addr, tid,
+				     tid_tx->dialog_token,
+				     sta->tid_seq[tid] >> 4,
+				     buf_size, tid_tx->timeout);
+
+	WARN_ON(test_and_set_bit(HT_AGG_STATE_SENT_ADDBA, &tid_tx->state));
 }
 
 void ieee80211_tx_ba_session_handle_start(struct sta_info *sta, int tid)
@@ -490,7 +523,16 @@ void ieee80211_tx_ba_session_handle_start(struct sta_info *sta, int tid)
 
 	params.ssn = sta->tid_seq[tid] >> 4;
 	ret = drv_ampdu_action(local, sdata, &params);
-	if (ret) {
+	if (ret == IEEE80211_AMPDU_TX_START_DELAY_ADDBA) {
+		return;
+	} else if (ret == IEEE80211_AMPDU_TX_START_IMMEDIATE) {
+		/*
+		 * We didn't send the request yet, so don't need to check
+		 * here if we already got a response, just mark as driver
+		 * ready immediately.
+		 */
+		set_bit(HT_AGG_STATE_DRV_READY, &tid_tx->state);
+	} else if (ret) {
 		ht_dbg(sdata,
 		       "BA request denied - HW unavailable for %pM tid %d\n",
 		       sta->sta.addr, tid);
@@ -506,21 +548,7 @@ void ieee80211_tx_ba_session_handle_start(struct sta_info *sta, int tid)
 		return;
 	}
 
-	/* activate the timer for the recipient's addBA response */
-	mod_timer(&tid_tx->addba_resp_timer, jiffies + ADDBA_RESP_INTERVAL);
-	ht_dbg(sdata, "activated addBA response timer on %pM tid %d\n",
-	       sta->sta.addr, tid);
-
-	spin_lock_bh(&sta->lock);
-	sta->ampdu_mlme.last_addba_req_time[tid] = jiffies;
-	sta->ampdu_mlme.addba_req_num[tid]++;
-	spin_unlock_bh(&sta->lock);
-
-	/* send AddBA request */
-	ieee80211_send_addba_request(sdata, sta->sta.addr, tid,
-				     tid_tx->dialog_token, params.ssn,
-				     IEEE80211_MAX_AMPDU_BUF,
-				     tid_tx->timeout);
+	ieee80211_send_addba_with_timeout(sta, tid_tx);
 }
 
 /*
@@ -529,28 +557,20 @@ void ieee80211_tx_ba_session_handle_start(struct sta_info *sta, int tid)
  */
 static void sta_tx_agg_session_timer_expired(struct timer_list *t)
 {
-	struct tid_ampdu_tx *tid_tx_timer =
-		from_timer(tid_tx_timer, t, session_timer);
-	struct sta_info *sta = tid_tx_timer->sta;
-	u8 tid = tid_tx_timer->tid;
-	struct tid_ampdu_tx *tid_tx;
+	struct tid_ampdu_tx *tid_tx = from_timer(tid_tx, t, session_timer);
+	struct sta_info *sta = tid_tx->sta;
+	u8 tid = tid_tx->tid;
 	unsigned long timeout;
 
-	rcu_read_lock();
-	tid_tx = rcu_dereference(sta->ampdu_mlme.tid_tx[tid]);
-	if (!tid_tx || test_bit(HT_AGG_STATE_STOPPING, &tid_tx->state)) {
-		rcu_read_unlock();
+	if (test_bit(HT_AGG_STATE_STOPPING, &tid_tx->state)) {
 		return;
 	}
 
 	timeout = tid_tx->last_tx + TU_TO_JIFFIES(tid_tx->timeout);
 	if (time_is_after_jiffies(timeout)) {
 		mod_timer(&tid_tx->session_timer, timeout);
-		rcu_read_unlock();
 		return;
 	}
-
-	rcu_read_unlock();
 
 	ht_dbg(sta->sdata, "tx session timer expired on %pM tid %d\n",
 	       sta->sta.addr, tid);
@@ -573,7 +593,8 @@ int ieee80211_start_tx_ba_session(struct ieee80211_sta *pubsta, u16 tid,
 		 "Requested to start BA session on reserved tid=%d", tid))
 		return -EINVAL;
 
-	if (!pubsta->ht_cap.ht_supported)
+	if (!pubsta->ht_cap.ht_supported &&
+	    sta->sdata->vif.bss_conf.chandef.chan->band != NL80211_BAND_6GHZ)
 		return -EINVAL;
 
 	if (WARN_ON_ONCE(!local->ops->ampdu_action))
@@ -749,6 +770,12 @@ void ieee80211_start_tx_ba_cb(struct sta_info *sta, int tid,
 	if (WARN_ON(test_and_set_bit(HT_AGG_STATE_DRV_READY, &tid_tx->state)))
 		return;
 
+	if (!test_bit(HT_AGG_STATE_SENT_ADDBA, &tid_tx->state)) {
+		ieee80211_send_addba_with_timeout(sta, tid_tx);
+		/* RESPONSE_RECEIVED state whould trigger the flow again */
+		return;
+	}
+
 	if (test_bit(HT_AGG_STATE_RESPONSE_RECEIVED, &tid_tx->state))
 		ieee80211_agg_tx_operational(local, sta, tid);
 }
@@ -918,14 +945,13 @@ void ieee80211_process_addba_resp(struct ieee80211_local *local,
 {
 	struct tid_ampdu_tx *tid_tx;
 	struct ieee80211_txq *txq;
-	u16 capab, tid;
-	u8 buf_size;
+	u16 capab, tid, buf_size;
 	bool amsdu;
 
 	capab = le16_to_cpu(mgmt->u.action.u.addba_resp.capab);
 	amsdu = capab & IEEE80211_ADDBA_PARAM_AMSDU_MASK;
-	tid = (capab & IEEE80211_ADDBA_PARAM_TID_MASK) >> 2;
-	buf_size = (capab & IEEE80211_ADDBA_PARAM_BUF_SIZE_MASK) >> 6;
+	tid = u16_get_bits(capab, IEEE80211_ADDBA_PARAM_TID_MASK);
+	buf_size = u16_get_bits(capab, IEEE80211_ADDBA_PARAM_BUF_SIZE_MASK);
 	buf_size = min(buf_size, local->hw.max_tx_aggregation_subframes);
 
 	txq = sta->sta.txq[tid];
@@ -983,6 +1009,9 @@ void ieee80211_process_addba_resp(struct ieee80211_local *local,
 			ieee80211_agg_tx_operational(local, sta, tid);
 
 		sta->ampdu_mlme.addba_req_num[tid] = 0;
+
+		tid_tx->timeout =
+			le16_to_cpu(mgmt->u.action.u.addba_resp.timeout);
 
 		if (tid_tx->timeout) {
 			mod_timer(&tid_tx->session_timer,

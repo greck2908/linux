@@ -24,7 +24,6 @@
 
 #include <linux/uaccess.h>
 #include <asm/ptrace.h>
-#include <asm/pgtable.h>
 #include <asm/psrcompat.h>
 #include <asm/fpumacro.h>
 #include <asm/visasm.h>
@@ -69,75 +68,6 @@ struct rt_signal_frame32 {
 	siginfo_extra_v8plus_t	v8plus;
 	/* __siginfo_rwin_t * */u32 rwin_save;
 } __attribute__((aligned(8)));
-
-int copy_siginfo_to_user32(compat_siginfo_t __user *to, const siginfo_t *from)
-{
-	int err;
-
-	if (!access_ok(VERIFY_WRITE, to, sizeof(compat_siginfo_t)))
-		return -EFAULT;
-
-	/* If you change siginfo_t structure, please be sure
-	   this code is fixed accordingly.
-	   It should never copy any pad contained in the structure
-	   to avoid security leaks, but must copy the generic
-	   3 ints plus the relevant union member.
-	   This routine must convert siginfo from 64bit to 32bit as well
-	   at the same time.  */
-	err = __put_user(from->si_signo, &to->si_signo);
-	err |= __put_user(from->si_errno, &to->si_errno);
-	err |= __put_user(from->si_code, &to->si_code);
-	if (from->si_code < 0)
-		err |= __copy_to_user(&to->_sifields._pad, &from->_sifields._pad, SI_PAD_SIZE);
-	else {
-		switch (siginfo_layout(from->si_signo, from->si_code)) {
-		case SIL_TIMER:
-			err |= __put_user(from->si_tid, &to->si_tid);
-			err |= __put_user(from->si_overrun, &to->si_overrun);
-			err |= __put_user(from->si_int, &to->si_int);
-			break;
-		case SIL_CHLD:
-			err |= __put_user(from->si_utime, &to->si_utime);
-			err |= __put_user(from->si_stime, &to->si_stime);
-			err |= __put_user(from->si_status, &to->si_status);
-		default:
-		case SIL_KILL:
-			err |= __put_user(from->si_pid, &to->si_pid);
-			err |= __put_user(from->si_uid, &to->si_uid);
-			break;
-		case SIL_FAULT:
-			err |= __put_user(from->si_trapno, &to->si_trapno);
-			err |= __put_user((unsigned long)from->si_addr, &to->si_addr);
-			break;
-		case SIL_POLL:
-			err |= __put_user(from->si_band, &to->si_band);
-			err |= __put_user(from->si_fd, &to->si_fd);
-			break;
-		case SIL_RT:
-			err |= __put_user(from->si_pid, &to->si_pid);
-			err |= __put_user(from->si_uid, &to->si_uid);
-			err |= __put_user(from->si_int, &to->si_int);
-			break;
-		}
-	}
-	return err;
-}
-
-/* CAUTION: This is just a very minimalist implementation for the
- *          sake of compat_sys_rt_sigqueueinfo()
- */
-int copy_siginfo_from_user32(siginfo_t *to, compat_siginfo_t __user *from)
-{
-	if (!access_ok(VERIFY_WRITE, from, sizeof(compat_siginfo_t)))
-		return -EFAULT;
-
-	if (copy_from_user(to, from, 3*sizeof(int)) ||
-	    copy_from_user(to->_sifields._pad, from->_sifields._pad,
-			   SI_PAD_SIZE))
-		return -EFAULT;
-
-	return 0;
-}
 
 /* Checks if the fp is valid.  We always build signal frames which are
  * 16-byte aligned, therefore we can always enforce that the restore
@@ -239,7 +169,7 @@ void do_sigreturn32(struct pt_regs *regs)
 	return;
 
 segv:
-	force_sig(SIGSEGV, current);
+	force_sig(SIGSEGV);
 }
 
 asmlinkage void do_rt_sigreturn32(struct pt_regs *regs)
@@ -325,7 +255,7 @@ asmlinkage void do_rt_sigreturn32(struct pt_regs *regs)
 	set_current_blocked(&set);
 	return;
 segv:
-	force_sig(SIGSEGV, current);
+	force_sig(SIGSEGV);
 }
 
 static void __user *get_sigframe(struct ksignal *ksig, struct pt_regs *regs, unsigned long framesize)
@@ -368,6 +298,7 @@ static void flush_signal_insns(unsigned long address)
 	unsigned long pstate, paddr;
 	pte_t *ptep, pte;
 	pgd_t *pgdp;
+	p4d_t *p4dp;
 	pud_t *pudp;
 	pmd_t *pmdp;
 
@@ -387,7 +318,10 @@ static void flush_signal_insns(unsigned long address)
 	pgdp = pgd_offset(current->mm, address);
 	if (pgd_none(*pgdp))
 		goto out_irqs_on;
-	pudp = pud_offset(pgdp, address);
+	p4dp = p4d_offset(pgdp, address);
+	if (p4d_none(*p4dp))
+		goto out_irqs_on;
+	pudp = pud_offset(p4dp, address);
 	if (pud_none(*pudp))
 		goto out_irqs_on;
 	pmdp = pmd_offset(pudp, address);
@@ -440,7 +374,11 @@ static int setup_frame32(struct ksignal *ksig, struct pt_regs *regs,
 		get_sigframe(ksig, regs, sigframe_size);
 	
 	if (invalid_frame_pointer(sf, sigframe_size)) {
-		do_exit(SIGILL);
+		if (show_unhandled_signals)
+			pr_info("%s[%d] bad frame in setup_frame32: %08lx TPC %08lx O7 %08lx\n",
+				current->comm, current->pid, (unsigned long)sf,
+				regs->tpc, regs->u_regs[UREG_I7]);
+		force_sigsegv(ksig->sig);
 		return -EINVAL;
 	}
 
@@ -570,7 +508,11 @@ static int setup_rt_frame32(struct ksignal *ksig, struct pt_regs *regs,
 		get_sigframe(ksig, regs, sigframe_size);
 	
 	if (invalid_frame_pointer(sf, sigframe_size)) {
-		do_exit(SIGILL);
+		if (show_unhandled_signals)
+			pr_info("%s[%d] bad frame in setup_rt_frame32: %08lx TPC %08lx O7 %08lx\n",
+				current->comm, current->pid, (unsigned long)sf,
+				regs->tpc, regs->u_regs[UREG_I7]);
+		force_sigsegv(ksig->sig);
 		return -EINVAL;
 	}
 
@@ -704,7 +646,7 @@ static inline void syscall_restart32(unsigned long orig_i0, struct pt_regs *regs
 	case ERESTARTSYS:
 		if (!(sa->sa_flags & SA_RESTART))
 			goto no_system_call_restart;
-		/* fallthrough */
+		fallthrough;
 	case ERESTARTNOINTR:
 		regs->u_regs[UREG_I0] = orig_i0;
 		regs->tpc -= 4;
@@ -744,6 +686,7 @@ void do_signal32(struct pt_regs * regs)
 				regs->tpc -= 4;
 				regs->tnpc -= 4;
 				pt_regs_clear_syscall(regs);
+				fallthrough;
 			case ERESTART_RESTARTBLOCK:
 				regs->u_regs[UREG_G1] = __NR_restart_syscall;
 				regs->tpc -= 4;

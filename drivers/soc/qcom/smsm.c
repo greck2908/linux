@@ -1,15 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2015, Sony Mobile Communications Inc.
  * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/interrupt.h>
@@ -138,7 +130,7 @@ struct smsm_host {
 /**
  * smsm_update_bits() - change bit in outgoing entry and inform subscribers
  * @data:	smsm context pointer
- * @offset:	bit in the entry
+ * @mask:	value mask
  * @value:	new value
  *
  * Used to set and clear the bits in the outgoing/local entry and inform
@@ -262,10 +254,8 @@ static void smsm_mask_irq(struct irq_data *irqd)
  * smsm_unmask_irq() - subscribe to cascades of IRQs of a certain status bit
  * @irqd:	IRQ handle to be unmasked
  *
-
  * This subscribes the local CPU to interrupts upon changes to the defined
  * status bit. The bit is also marked for cascading.
-
  */
 static void smsm_unmask_irq(struct irq_data *irqd)
 {
@@ -496,8 +486,10 @@ static int qcom_smsm_probe(struct platform_device *pdev)
 	if (!smsm->hosts)
 		return -ENOMEM;
 
-	local_node = of_find_node_with_property(of_node_get(pdev->dev.of_node),
-						"#qcom,smem-state-cells");
+	for_each_child_of_node(pdev->dev.of_node, local_node) {
+		if (of_find_property(local_node, "#qcom,smem-state-cells", NULL))
+			break;
+	}
 	if (!local_node) {
 		dev_err(&pdev->dev, "no state entry\n");
 		return -EINVAL;

@@ -1381,7 +1381,7 @@ static void dump_irq(struct seq_file *s, char *label, u8 mask)
 		(mask & SL11H_INTMASK_DP) ? " dp" : "");
 }
 
-static int sl811h_show(struct seq_file *s, void *unused)
+static int sl811h_debug_show(struct seq_file *s, void *unused)
 {
 	struct sl811		*sl811 = s->private;
 	struct sl811h_ep	*ep;
@@ -1491,25 +1491,14 @@ static int sl811h_show(struct seq_file *s, void *unused)
 
 	return 0;
 }
-
-static int sl811h_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, sl811h_show, inode->i_private);
-}
-
-static const struct file_operations debug_ops = {
-	.open		= sl811h_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
+DEFINE_SHOW_ATTRIBUTE(sl811h_debug);
 
 /* expect just one sl811 per system */
 static void create_debug_file(struct sl811 *sl811)
 {
 	sl811->debug_file = debugfs_create_file("sl811h", S_IRUGO,
 						usb_debug_root, sl811,
-						&debug_ops);
+						&sl811h_debug_fops);
 }
 
 static void remove_debug_file(struct sl811 *sl811)
@@ -1625,10 +1614,16 @@ sl811h_probe(struct platform_device *dev)
 	void __iomem		*addr_reg;
 	void __iomem		*data_reg;
 	int			retval;
-	u8			tmp, ioaddr = 0;
+	u8			tmp, ioaddr;
 	unsigned long		irqflags;
 
 	if (usb_disabled())
+		return -ENODEV;
+
+	/* the chip may be wired for either kind of addressing */
+	addr = platform_get_mem_or_io(dev, 0);
+	data = platform_get_mem_or_io(dev, 1);
+	if (!addr || !data || resource_type(addr) != resource_type(data))
 		return -ENODEV;
 
 	/* basic sanity checks first.  board-specific init logic should
@@ -1643,22 +1638,8 @@ sl811h_probe(struct platform_device *dev)
 	irq = ires->start;
 	irqflags = ires->flags & IRQF_TRIGGER_MASK;
 
-	/* refuse to confuse usbcore */
-	if (dev->dev.dma_mask) {
-		dev_dbg(&dev->dev, "no we won't dma\n");
-		return -EINVAL;
-	}
-
-	/* the chip may be wired for either kind of addressing */
-	addr = platform_get_resource(dev, IORESOURCE_MEM, 0);
-	data = platform_get_resource(dev, IORESOURCE_MEM, 1);
-	retval = -EBUSY;
-	if (!addr || !data) {
-		addr = platform_get_resource(dev, IORESOURCE_IO, 0);
-		data = platform_get_resource(dev, IORESOURCE_IO, 1);
-		if (!addr || !data)
-			return -ENODEV;
-		ioaddr = 1;
+	ioaddr = resource_type(addr) == IORESOURCE_IO;
+	if (ioaddr) {
 		/*
 		 * NOTE: 64-bit resource->start is getting truncated
 		 * to avoid compiler warning, assuming that ->start
@@ -1809,7 +1790,7 @@ struct platform_driver sl811h_driver = {
 	.suspend =	sl811h_suspend,
 	.resume =	sl811h_resume,
 	.driver = {
-		.name =	(char *) hcd_name,
+		.name =	hcd_name,
 	},
 };
 EXPORT_SYMBOL(sl811h_driver);
