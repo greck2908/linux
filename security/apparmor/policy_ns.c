@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AppArmor security module
  *
@@ -6,6 +5,11 @@
  *
  * Copyright (C) 1998-2008 Novell/SUSE
  * Copyright 2009-2017 Canonical Ltd.
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation, version 2 of the
+ * License.
  *
  * AppArmor policy namespaces, allow for different sets of policies
  * to be loaded for tasks within the namespace.
@@ -17,7 +21,7 @@
 #include <linux/string.h>
 
 #include "include/apparmor.h"
-#include "include/cred.h"
+#include "include/context.h"
 #include "include/policy_ns.h"
 #include "include/label.h"
 #include "include/policy.h"
@@ -121,9 +125,9 @@ static struct aa_ns *alloc_ns(const char *prefix, const char *name)
 	return ns;
 
 fail_unconfined:
-	kfree_sensitive(ns->base.hname);
+	kzfree(ns->base.hname);
 fail_ns:
-	kfree_sensitive(ns);
+	kzfree(ns);
 	return NULL;
 }
 
@@ -145,7 +149,7 @@ void aa_free_ns(struct aa_ns *ns)
 
 	ns->unconfined->ns = NULL;
 	aa_free_profile(ns->unconfined);
-	kfree_sensitive(ns);
+	kzfree(ns);
 }
 
 /**
@@ -251,7 +255,7 @@ static struct aa_ns *__aa_create_ns(struct aa_ns *parent, const char *name,
 
 	ns = alloc_ns(parent->base.hname, name);
 	if (!ns)
-		return ERR_PTR(-ENOMEM);
+		return NULL;
 	ns->level = parent->level + 1;
 	mutex_lock_nested(&ns->lock, ns->level);
 	error = __aafs_ns_mkdir(ns, ns_subns_dir(parent), name, dir);

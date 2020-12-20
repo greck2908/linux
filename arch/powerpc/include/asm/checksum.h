@@ -1,13 +1,17 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef _ASM_POWERPC_CHECKSUM_H
 #define _ASM_POWERPC_CHECKSUM_H
 #ifdef __KERNEL__
 
 /*
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version
+ * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/bitops.h>
-#include <linux/in6.h>
+#ifdef CONFIG_GENERIC_CSUM
+#include <asm-generic/checksum.h>
+#else
 /*
  * Computes the checksum of a memory block at src, length len,
  * and adds in "sum" (32-bit), while copying the block to dst.
@@ -18,18 +22,19 @@
  * Like csum_partial, this must be called with even lengths,
  * except for the last fragment.
  */
-extern __wsum csum_partial_copy_generic(const void *src, void *dst, int len);
+extern __wsum csum_partial_copy_generic(const void *src, void *dst,
+					      int len, __wsum sum,
+					      int *src_err, int *dst_err);
 
 #define _HAVE_ARCH_COPY_AND_CSUM_FROM_USER
 extern __wsum csum_and_copy_from_user(const void __user *src, void *dst,
-				      int len);
+				      int len, __wsum sum, int *err_ptr);
 #define HAVE_CSUM_COPY_USER
 extern __wsum csum_and_copy_to_user(const void *src, void __user *dst,
-				    int len);
+				    int len, __wsum sum, int *err_ptr);
 
-#define _HAVE_ARCH_CSUM_AND_COPY
-#define csum_partial_copy_nocheck(src, dst, len)   \
-        csum_partial_copy_generic((src), (dst), (len))
+#define csum_partial_copy_nocheck(src, dst, len, sum)   \
+        csum_partial_copy_generic((src), (dst), (len), (sum), NULL, NULL)
 
 
 /*
@@ -50,7 +55,11 @@ static inline __sum16 csum_fold(__wsum sum)
 
 static inline u32 from64to32(u64 x)
 {
-	return (x + ror64(x, 32)) >> 32;
+	/* add up 32-bit and 32-bit for 32+c bit */
+	x = (x & 0xffffffff) + (x >> 32);
+	/* add up carry.. */
+	x = (x & 0xffffffff) + (x >> 32);
+	return (u32)x;
 }
 
 static inline __wsum csum_tcpudp_nofold(__be32 saddr, __be32 daddr, __u32 len,
@@ -103,7 +112,7 @@ static inline __wsum csum_add(__wsum csum, __wsum addend)
 
 #ifdef __powerpc64__
 	res += (__force u64)addend;
-	return (__force __wsum)((u32)res + (res >> 32));
+	return (__force __wsum) from64to32(res);
 #else
 	asm("addc %0,%0,%1;"
 	    "addze %0,%0;"
@@ -163,7 +172,7 @@ static inline __sum16 ip_fast_csum(const void *iph, unsigned int ihl)
  */
 __wsum __csum_partial(const void *buff, int len, __wsum sum);
 
-static __always_inline __wsum csum_partial(const void *buff, int len, __wsum sum)
+static inline __wsum csum_partial(const void *buff, int len, __wsum sum)
 {
 	if (__builtin_constant_p(len) && len <= 16 && (len & 1) == 0) {
 		if (len == 2)
@@ -205,10 +214,6 @@ static inline __sum16 ip_compute_csum(const void *buff, int len)
 	return csum_fold(csum_partial(buff, len, 0));
 }
 
-#define _HAVE_ARCH_IPV6_CSUM
-__sum16 csum_ipv6_magic(const struct in6_addr *saddr,
-			const struct in6_addr *daddr,
-			__u32 len, __u8 proto, __wsum sum);
-
+#endif
 #endif /* __KERNEL__ */
 #endif

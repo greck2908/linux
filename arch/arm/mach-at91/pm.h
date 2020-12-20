@@ -1,8 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * AT91 Power Management
  *
  * Copyright (C) 2005 David Brownell
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  */
 #ifndef __ARCH_ARM_MACH_AT91_PM
 #define __ARCH_ARM_MACH_AT91_PM
@@ -17,11 +21,8 @@
 #define AT91_MEMCTRL_SDRAMC	1
 #define AT91_MEMCTRL_DDRSDR	2
 
-#define	AT91_PM_STANDBY		0x00
-#define AT91_PM_ULP0		0x01
-#define AT91_PM_ULP0_FAST	0x02
-#define AT91_PM_ULP1		0x03
-#define	AT91_PM_BACKUP		0x04
+#define	AT91_PM_SLOW_CLOCK	0x01
+#define	AT91_PM_BACKUP		0x02
 
 #ifndef __ASSEMBLY__
 struct at91_pm_data {
@@ -34,8 +35,6 @@ struct at91_pm_data {
 	void __iomem *sfrbu;
 	unsigned int standby_mode;
 	unsigned int suspend_mode;
-	unsigned int pmc_mckr_offset;
-	unsigned int pmc_version;
 };
 #endif
 

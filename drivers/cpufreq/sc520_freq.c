@@ -1,8 +1,12 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	sc520_freq.c: cpufreq driver for the AMD Elan sc520
  *
  *	Copyright (C) 2005 Sean Young <sean@mess.org>
+ *
+ *	This program is free software; you can redistribute it and/or
+ *	modify it under the terms of the GNU General Public License
+ *	as published by the Free Software Foundation; either version
+ *	2 of the License, or (at your option) any later version.
  *
  *	Based on elanfreq.c
  *
@@ -79,9 +83,8 @@ static int sc520_freq_cpu_init(struct cpufreq_policy *policy)
 
 	/* cpuinfo and default policy values */
 	policy->cpuinfo.transition_latency = 1000000; /* 1ms */
-	policy->freq_table = sc520_freq_table;
 
-	return 0;
+	return cpufreq_table_validate_and_show(policy, sc520_freq_table);
 }
 
 
@@ -95,7 +98,7 @@ static struct cpufreq_driver sc520_freq_driver = {
 };
 
 static const struct x86_cpu_id sc520_ids[] = {
-	X86_MATCH_VENDOR_FAM_MODEL(AMD, 4, 9, NULL),
+	{ X86_VENDOR_AMD, 4, 9 },
 	{}
 };
 MODULE_DEVICE_TABLE(x86cpu, sc520_ids);

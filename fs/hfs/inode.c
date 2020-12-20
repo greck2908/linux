@@ -17,7 +17,6 @@
 #include <linux/cred.h>
 #include <linux/uio.h>
 #include <linux/xattr.h>
-#include <linux/blkdev.h>
 
 #include "hfs_fs.h"
 #include "btree.h"
@@ -542,11 +541,11 @@ static struct dentry *hfs_file_lookup(struct inode *dir, struct dentry *dentry,
 	HFS_I(inode)->rsrc_inode = dir;
 	HFS_I(dir)->rsrc_inode = inode;
 	igrab(dir);
-	inode_fake_hash(inode);
+	hlist_add_fake(&inode->i_hash);
 	mark_inode_dirty(inode);
-	dont_mount(dentry);
 out:
-	return d_splice_alias(inode, dentry);
+	d_add(dentry, inode);
+	return NULL;
 }
 
 void hfs_evict_inode(struct inode *inode)
@@ -643,8 +642,6 @@ int hfs_inode_setattr(struct dentry *dentry, struct iattr * attr)
 
 		truncate_setsize(inode, attr->ia_size);
 		hfs_file_truncate(inode);
-		inode->i_atime = inode->i_mtime = inode->i_ctime =
-						  current_time(inode);
 	}
 
 	setattr_copy(inode, attr);

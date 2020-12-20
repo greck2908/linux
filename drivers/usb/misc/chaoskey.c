@@ -98,7 +98,6 @@ static void chaoskey_free(struct chaoskey *dev)
 		usb_free_urb(dev->urb);
 		kfree(dev->name);
 		kfree(dev->buf);
-		usb_put_intf(dev->interface);
 		kfree(dev);
 	}
 }
@@ -146,8 +145,6 @@ static int chaoskey_probe(struct usb_interface *interface,
 	if (dev == NULL)
 		goto out;
 
-	dev->interface = usb_get_intf(interface);
-
 	dev->buf = kmalloc(size, GFP_KERNEL);
 
 	if (dev->buf == NULL)
@@ -171,19 +168,25 @@ static int chaoskey_probe(struct usb_interface *interface,
 	 */
 
 	if (udev->product && udev->serial) {
-		dev->name = kasprintf(GFP_KERNEL, "%s-%s", udev->product,
-				      udev->serial);
+		dev->name = kmalloc(strlen(udev->product) + 1 +
+				    strlen(udev->serial) + 1, GFP_KERNEL);
 		if (dev->name == NULL)
 			goto out;
+
+		strcpy(dev->name, udev->product);
+		strcat(dev->name, "-");
+		strcat(dev->name, udev->serial);
 	}
+
+	dev->interface = interface;
 
 	dev->in_ep = in_ep;
 
 	if (le16_to_cpu(udev->descriptor.idVendor) != ALEA_VENDOR_ID)
-		dev->reads_started = true;
+		dev->reads_started = 1;
 
 	dev->size = size;
-	dev->present = true;
+	dev->present = 1;
 
 	init_waitqueue_head(&dev->wait_q);
 
@@ -236,7 +239,7 @@ static void chaoskey_disconnect(struct usb_interface *interface)
 	usb_set_intfdata(interface, NULL);
 	mutex_lock(&dev->lock);
 
-	dev->present = false;
+	dev->present = 0;
 	usb_poison_urb(dev->urb);
 
 	if (!dev->open) {
@@ -384,17 +387,13 @@ static int _chaoskey_fill(struct chaoskey *dev)
 		!dev->reading,
 		(started ? NAK_TIMEOUT : ALEA_FIRST_TIMEOUT) );
 
-	if (result < 0) {
-		usb_kill_urb(dev->urb);
+	if (result < 0)
 		goto out;
-	}
 
-	if (result == 0) {
+	if (result == 0)
 		result = -ETIMEDOUT;
-		usb_kill_urb(dev->urb);
-	} else {
+	else
 		result = dev->valid;
-	}
 out:
 	/* Let the device go back to sleep eventually */
 	usb_autopm_put_interface(dev->interface);
@@ -530,21 +529,7 @@ static int chaoskey_suspend(struct usb_interface *interface,
 
 static int chaoskey_resume(struct usb_interface *interface)
 {
-	struct chaoskey *dev;
-	struct usb_device *udev = interface_to_usbdev(interface);
-
 	usb_dbg(interface, "resume");
-	dev = usb_get_intfdata(interface);
-
-	/*
-	 * We may have lost power.
-	 * In that case the device that needs a long time
-	 * for the first requests needs an extended timeout
-	 * again
-	 */
-	if (le16_to_cpu(udev->descriptor.idVendor) == ALEA_VENDOR_ID)
-		dev->reads_started = false;
-
 	return 0;
 }
 #else

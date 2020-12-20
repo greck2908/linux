@@ -1,8 +1,38 @@
-// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
-/* Copyright (c) 2017-2018 Mellanox Technologies. All rights reserved */
+/*
+ * drivers/net/ethernet/mellanox/mlxsw/spectrum_dpipe.c
+ * Copyright (c) 2017 Mellanox Technologies. All rights reserved.
+ * Copyright (c) 2017 Arkadi Sharshevsky <arakdis@mellanox.com>
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the names of the copyright holders nor the names of its
+ *    contributors may be used to endorse or promote products derived from
+ *    this software without specific prior written permission.
+ *
+ * Alternatively, this software may be distributed under the terms of the
+ * GNU General Public License ("GPL") version 2 as published by the Free
+ * Software Foundation.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
 
 #include <linux/kernel.h>
-#include <linux/mutex.h>
 #include <net/devlink.h>
 
 #include "spectrum.h"
@@ -211,17 +241,17 @@ mlxsw_sp_dpipe_table_erif_entries_dump(void *priv, bool counters_enabled,
 		return err;
 
 	rif_count = MLXSW_CORE_RES_GET(mlxsw_sp->core, MAX_RIFS);
-	mutex_lock(&mlxsw_sp->router->lock);
+	rtnl_lock();
 	i = 0;
 start_again:
 	err = devlink_dpipe_entry_ctx_prepare(dump_ctx);
 	if (err)
-		goto err_ctx_prepare;
+		return err;
 	j = 0;
 	for (; i < rif_count; i++) {
 		struct mlxsw_sp_rif *rif = mlxsw_sp_rif_by_index(mlxsw_sp, i);
 
-		if (!rif || !mlxsw_sp_rif_dev(rif))
+		if (!rif)
 			continue;
 		err = mlxsw_sp_erif_entry_get(mlxsw_sp, &entry, rif,
 					      counters_enabled);
@@ -242,14 +272,13 @@ start_again:
 	devlink_dpipe_entry_ctx_close(dump_ctx);
 	if (i != rif_count)
 		goto start_again;
-	mutex_unlock(&mlxsw_sp->router->lock);
+	rtnl_unlock();
 
 	devlink_dpipe_entry_clear(&entry);
 	return 0;
 err_entry_append:
 err_entry_get:
-err_ctx_prepare:
-	mutex_unlock(&mlxsw_sp->router->lock);
+	rtnl_unlock();
 	devlink_dpipe_entry_clear(&entry);
 	return err;
 }
@@ -259,7 +288,7 @@ static int mlxsw_sp_dpipe_table_erif_counters_update(void *priv, bool enable)
 	struct mlxsw_sp *mlxsw_sp = priv;
 	int i;
 
-	mutex_lock(&mlxsw_sp->router->lock);
+	rtnl_lock();
 	for (i = 0; i < MLXSW_CORE_RES_GET(mlxsw_sp->core, MAX_RIFS); i++) {
 		struct mlxsw_sp_rif *rif = mlxsw_sp_rif_by_index(mlxsw_sp, i);
 
@@ -272,7 +301,7 @@ static int mlxsw_sp_dpipe_table_erif_counters_update(void *priv, bool enable)
 			mlxsw_sp_rif_counter_free(mlxsw_sp, rif,
 						  MLXSW_SP_RIF_COUNTER_EGRESS);
 	}
-	mutex_unlock(&mlxsw_sp->router->lock);
+	rtnl_unlock();
 	return 0;
 }
 
@@ -547,7 +576,7 @@ mlxsw_sp_dpipe_table_host_entries_get(struct mlxsw_sp *mlxsw_sp,
 	int i, j;
 	int err;
 
-	mutex_lock(&mlxsw_sp->router->lock);
+	rtnl_lock();
 	i = 0;
 	rif_count = MLXSW_CORE_RES_GET(mlxsw_sp->core, MAX_RIFS);
 start_again:
@@ -603,12 +632,12 @@ out:
 	if (i != rif_count)
 		goto start_again;
 
-	mutex_unlock(&mlxsw_sp->router->lock);
+	rtnl_unlock();
 	return 0;
 
 err_ctx_prepare:
 err_entry_append:
-	mutex_unlock(&mlxsw_sp->router->lock);
+	rtnl_unlock();
 	return err;
 }
 
@@ -663,7 +692,7 @@ mlxsw_sp_dpipe_table_host_counters_update(struct mlxsw_sp *mlxsw_sp,
 {
 	int i;
 
-	mutex_lock(&mlxsw_sp->router->lock);
+	rtnl_lock();
 	for (i = 0; i < MLXSW_CORE_RES_GET(mlxsw_sp->core, MAX_RIFS); i++) {
 		struct mlxsw_sp_rif *rif = mlxsw_sp_rif_by_index(mlxsw_sp, i);
 		struct mlxsw_sp_neigh_entry *neigh_entry;
@@ -685,7 +714,7 @@ mlxsw_sp_dpipe_table_host_counters_update(struct mlxsw_sp *mlxsw_sp,
 							    enable);
 		}
 	}
-	mutex_unlock(&mlxsw_sp->router->lock);
+	rtnl_unlock();
 }
 
 static int mlxsw_sp_dpipe_table_host4_counters_update(void *priv, bool enable)
@@ -702,7 +731,7 @@ mlxsw_sp_dpipe_table_host_size_get(struct mlxsw_sp *mlxsw_sp, int type)
 	u64 size = 0;
 	int i;
 
-	mutex_lock(&mlxsw_sp->router->lock);
+	rtnl_lock();
 	for (i = 0; i < MLXSW_CORE_RES_GET(mlxsw_sp->core, MAX_RIFS); i++) {
 		struct mlxsw_sp_rif *rif = mlxsw_sp_rif_by_index(mlxsw_sp, i);
 		struct mlxsw_sp_neigh_entry *neigh_entry;
@@ -722,7 +751,7 @@ mlxsw_sp_dpipe_table_host_size_get(struct mlxsw_sp *mlxsw_sp, int type)
 			size++;
 		}
 	}
-	mutex_unlock(&mlxsw_sp->router->lock);
+	rtnl_unlock();
 
 	return size;
 }
@@ -742,33 +771,14 @@ static struct devlink_dpipe_table_ops mlxsw_sp_host4_ops = {
 	.size_get = mlxsw_sp_dpipe_table_host4_size_get,
 };
 
-#define MLXSW_SP_DPIPE_TABLE_RESOURCE_UNIT_HOST4 1
-
 static int mlxsw_sp_dpipe_host4_table_init(struct mlxsw_sp *mlxsw_sp)
 {
 	struct devlink *devlink = priv_to_devlink(mlxsw_sp->core);
-	int err;
 
-	err = devlink_dpipe_table_register(devlink,
-					   MLXSW_SP_DPIPE_TABLE_NAME_HOST4,
-					   &mlxsw_sp_host4_ops,
-					   mlxsw_sp, false);
-	if (err)
-		return err;
-
-	err = devlink_dpipe_table_resource_set(devlink,
-					       MLXSW_SP_DPIPE_TABLE_NAME_HOST4,
-					       MLXSW_SP_RESOURCE_KVD_HASH_SINGLE,
-					       MLXSW_SP_DPIPE_TABLE_RESOURCE_UNIT_HOST4);
-	if (err)
-		goto err_resource_set;
-
-	return 0;
-
-err_resource_set:
-	devlink_dpipe_table_unregister(devlink,
-				       MLXSW_SP_DPIPE_TABLE_NAME_HOST4);
-	return err;
+	return devlink_dpipe_table_register(devlink,
+					    MLXSW_SP_DPIPE_TABLE_NAME_HOST4,
+					    &mlxsw_sp_host4_ops,
+					    mlxsw_sp, false);
 }
 
 static void mlxsw_sp_dpipe_host4_table_fini(struct mlxsw_sp *mlxsw_sp)
@@ -819,33 +829,14 @@ static struct devlink_dpipe_table_ops mlxsw_sp_host6_ops = {
 	.size_get = mlxsw_sp_dpipe_table_host6_size_get,
 };
 
-#define MLXSW_SP_DPIPE_TABLE_RESOURCE_UNIT_HOST6 2
-
 static int mlxsw_sp_dpipe_host6_table_init(struct mlxsw_sp *mlxsw_sp)
 {
 	struct devlink *devlink = priv_to_devlink(mlxsw_sp->core);
-	int err;
 
-	err = devlink_dpipe_table_register(devlink,
-					   MLXSW_SP_DPIPE_TABLE_NAME_HOST6,
-					   &mlxsw_sp_host6_ops,
-					   mlxsw_sp, false);
-	if (err)
-		return err;
-
-	err = devlink_dpipe_table_resource_set(devlink,
-					       MLXSW_SP_DPIPE_TABLE_NAME_HOST6,
-					       MLXSW_SP_RESOURCE_KVD_HASH_DOUBLE,
-					       MLXSW_SP_DPIPE_TABLE_RESOURCE_UNIT_HOST6);
-	if (err)
-		goto err_resource_set;
-
-	return 0;
-
-err_resource_set:
-	devlink_dpipe_table_unregister(devlink,
-				       MLXSW_SP_DPIPE_TABLE_NAME_HOST6);
-	return err;
+	return devlink_dpipe_table_register(devlink,
+					    MLXSW_SP_DPIPE_TABLE_NAME_HOST6,
+					    &mlxsw_sp_host6_ops,
+					    mlxsw_sp, false);
 }
 
 static void mlxsw_sp_dpipe_host6_table_fini(struct mlxsw_sp *mlxsw_sp)
@@ -913,8 +904,7 @@ static u64 mlxsw_sp_dpipe_table_adj_size(struct mlxsw_sp *mlxsw_sp)
 
 	mlxsw_sp_nexthop_for_each(nh, mlxsw_sp->router)
 		if (mlxsw_sp_nexthop_offload(nh) &&
-		    !mlxsw_sp_nexthop_group_has_ipip(nh) &&
-		    !mlxsw_sp_nexthop_is_discard(nh))
+		    !mlxsw_sp_nexthop_group_has_ipip(nh))
 			size++;
 	return size;
 }
@@ -1095,7 +1085,7 @@ mlxsw_sp_dpipe_table_adj_entries_get(struct mlxsw_sp *mlxsw_sp,
 	int j;
 	int err;
 
-	mutex_lock(&mlxsw_sp->router->lock);
+	rtnl_lock();
 	nh_count_max = mlxsw_sp_dpipe_table_adj_size(mlxsw_sp);
 start_again:
 	err = devlink_dpipe_entry_ctx_prepare(dump_ctx);
@@ -1106,8 +1096,7 @@ start_again:
 	nh_count = 0;
 	mlxsw_sp_nexthop_for_each(nh, mlxsw_sp->router) {
 		if (!mlxsw_sp_nexthop_offload(nh) ||
-		    mlxsw_sp_nexthop_group_has_ipip(nh) ||
-		    mlxsw_sp_nexthop_is_discard(nh))
+		    mlxsw_sp_nexthop_group_has_ipip(nh))
 			continue;
 
 		if (nh_count < nh_skip)
@@ -1133,13 +1122,13 @@ skip:
 	devlink_dpipe_entry_ctx_close(dump_ctx);
 	if (nh_count != nh_count_max)
 		goto start_again;
-	mutex_unlock(&mlxsw_sp->router->lock);
+	rtnl_unlock();
 
 	return 0;
 
 err_ctx_prepare:
 err_entry_append:
-	mutex_unlock(&mlxsw_sp->router->lock);
+	rtnl_unlock();
 	return err;
 }
 
@@ -1188,8 +1177,7 @@ static int mlxsw_sp_dpipe_table_adj_counters_update(void *priv, bool enable)
 
 	mlxsw_sp_nexthop_for_each(nh, mlxsw_sp->router) {
 		if (!mlxsw_sp_nexthop_offload(nh) ||
-		    mlxsw_sp_nexthop_group_has_ipip(nh) ||
-		    mlxsw_sp_nexthop_is_discard(nh))
+		    mlxsw_sp_nexthop_group_has_ipip(nh))
 			continue;
 
 		mlxsw_sp_nexthop_indexes(nh, &adj_index, &adj_size,
@@ -1210,9 +1198,9 @@ mlxsw_sp_dpipe_table_adj_size_get(void *priv)
 	struct mlxsw_sp *mlxsw_sp = priv;
 	u64 size;
 
-	mutex_lock(&mlxsw_sp->router->lock);
+	rtnl_lock();
 	size = mlxsw_sp_dpipe_table_adj_size(mlxsw_sp);
-	mutex_unlock(&mlxsw_sp->router->lock);
+	rtnl_unlock();
 
 	return size;
 }
@@ -1225,33 +1213,14 @@ static struct devlink_dpipe_table_ops mlxsw_sp_dpipe_table_adj_ops = {
 	.size_get = mlxsw_sp_dpipe_table_adj_size_get,
 };
 
-#define MLXSW_SP_DPIPE_TABLE_RESOURCE_UNIT_ADJ 1
-
 static int mlxsw_sp_dpipe_adj_table_init(struct mlxsw_sp *mlxsw_sp)
 {
 	struct devlink *devlink = priv_to_devlink(mlxsw_sp->core);
-	int err;
 
-	err = devlink_dpipe_table_register(devlink,
-					   MLXSW_SP_DPIPE_TABLE_NAME_ADJ,
-					   &mlxsw_sp_dpipe_table_adj_ops,
-					   mlxsw_sp, false);
-	if (err)
-		return err;
-
-	err = devlink_dpipe_table_resource_set(devlink,
-					       MLXSW_SP_DPIPE_TABLE_NAME_ADJ,
-					       MLXSW_SP_RESOURCE_KVD_LINEAR,
-					       MLXSW_SP_DPIPE_TABLE_RESOURCE_UNIT_ADJ);
-	if (err)
-		goto err_resource_set;
-
-	return 0;
-
-err_resource_set:
-	devlink_dpipe_table_unregister(devlink,
-				       MLXSW_SP_DPIPE_TABLE_NAME_ADJ);
-	return err;
+	return devlink_dpipe_table_register(devlink,
+					    MLXSW_SP_DPIPE_TABLE_NAME_ADJ,
+					    &mlxsw_sp_dpipe_table_adj_ops,
+					    mlxsw_sp, false);
 }
 
 static void mlxsw_sp_dpipe_adj_table_fini(struct mlxsw_sp *mlxsw_sp)

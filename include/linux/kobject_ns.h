@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /* Kernel object name space definitions
  *
  * Copyright (c) 2002-2003 Patrick Mochel
@@ -8,7 +7,9 @@
  *
  * Split from kobject.h by David Howells (dhowells@redhat.com)
  *
- * Please read Documentation/core-api/kobject.rst before using the kobject
+ * This file is released under the GPLv2.
+ *
+ * Please read Documentation/kobject.txt before using the kobject
  * interface, ESPECIALLY the parts about reference counts and object
  * destructors.
  */

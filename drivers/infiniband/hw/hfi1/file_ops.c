@@ -1,6 +1,5 @@
 /*
- * Copyright(c) 2020 Cornelis Networks, Inc.
- * Copyright(c) 2015-2020 Intel Corporation.
+ * Copyright(c) 2015-2017 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -75,7 +74,7 @@
 static int hfi1_file_open(struct inode *inode, struct file *fp);
 static int hfi1_file_close(struct inode *inode, struct file *fp);
 static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from);
-static __poll_t hfi1_poll(struct file *fp, struct poll_table_struct *pt);
+static unsigned int hfi1_poll(struct file *fp, struct poll_table_struct *pt);
 static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma);
 
 static u64 kvirt_to_phys(void *addr);
@@ -103,15 +102,15 @@ static int allocate_ctxt(struct hfi1_filedata *fd, struct hfi1_devdata *dd,
 			 struct hfi1_user_info *uinfo,
 			 struct hfi1_ctxtdata **cd);
 static void deallocate_ctxt(struct hfi1_ctxtdata *uctxt);
-static __poll_t poll_urgent(struct file *fp, struct poll_table_struct *pt);
-static __poll_t poll_next(struct file *fp, struct poll_table_struct *pt);
+static unsigned int poll_urgent(struct file *fp, struct poll_table_struct *pt);
+static unsigned int poll_next(struct file *fp, struct poll_table_struct *pt);
 static int user_event_ack(struct hfi1_ctxtdata *uctxt, u16 subctxt,
 			  unsigned long arg);
 static int set_ctxt_pkey(struct hfi1_ctxtdata *uctxt, unsigned long arg);
 static int ctxt_reset(struct hfi1_ctxtdata *uctxt);
 static int manage_rcvq(struct hfi1_ctxtdata *uctxt, u16 subctxt,
 		       unsigned long arg);
-static vm_fault_t vma_fault(struct vm_fault *vmf);
+static int vma_fault(struct vm_fault *vmf);
 static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 			    unsigned long arg);
 
@@ -197,25 +196,29 @@ static int hfi1_file_open(struct inode *inode, struct file *fp)
 	if (!atomic_inc_not_zero(&dd->user_refcount))
 		return -ENXIO;
 
+	/* Just take a ref now. Not all opens result in a context assign */
+	kobject_get(&dd->kobj);
+
 	/* The real work is performed later in assign_ctxt() */
 
 	fd = kzalloc(sizeof(*fd), GFP_KERNEL);
 
-	if (!fd || init_srcu_struct(&fd->pq_srcu))
-		goto nomem;
-	spin_lock_init(&fd->pq_rcu_lock);
-	spin_lock_init(&fd->tid_lock);
-	spin_lock_init(&fd->invalid_lock);
-	fd->rec_cpu_num = -1; /* no cpu affinity by default */
-	fd->dd = dd;
-	fp->private_data = fd;
+	if (fd) {
+		fd->rec_cpu_num = -1; /* no cpu affinity by default */
+		fd->mm = current->mm;
+		mmgrab(fd->mm);
+		fd->dd = dd;
+		fp->private_data = fd;
+	} else {
+		fp->private_data = NULL;
+
+		if (atomic_dec_and_test(&dd->user_refcount))
+			complete(&dd->user_comp);
+
+		return -ENOMEM;
+	}
+
 	return 0;
-nomem:
-	kfree(fd);
-	fp->private_data = NULL;
-	if (atomic_dec_and_test(&dd->user_refcount))
-		complete(&dd->user_comp);
-	return -ENOMEM;
 }
 
 static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
@@ -300,30 +303,21 @@ static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from)
 {
 	struct hfi1_filedata *fd = kiocb->ki_filp->private_data;
-	struct hfi1_user_sdma_pkt_q *pq;
+	struct hfi1_user_sdma_pkt_q *pq = fd->pq;
 	struct hfi1_user_sdma_comp_q *cq = fd->cq;
 	int done = 0, reqs = 0;
 	unsigned long dim = from->nr_segs;
-	int idx;
 
-	idx = srcu_read_lock(&fd->pq_srcu);
-	pq = srcu_dereference(fd->pq, &fd->pq_srcu);
-	if (!cq || !pq) {
-		srcu_read_unlock(&fd->pq_srcu, idx);
+	if (!cq || !pq)
 		return -EIO;
-	}
 
-	if (!iter_is_iovec(from) || !dim) {
-		srcu_read_unlock(&fd->pq_srcu, idx);
+	if (!iter_is_iovec(from) || !dim)
 		return -EINVAL;
-	}
 
 	trace_hfi1_sdma_request(fd->dd, fd->uctxt->ctxt, fd->subctxt, dim);
 
-	if (atomic_read(&pq->n_reqs) == pq->n_max_reqs) {
-		srcu_read_unlock(&fd->pq_srcu, idx);
+	if (atomic_read(&pq->n_reqs) == pq->n_max_reqs)
 		return -ENOSPC;
-	}
 
 	while (dim) {
 		int ret;
@@ -341,7 +335,6 @@ static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from)
 		reqs++;
 	}
 
-	srcu_read_unlock(&fd->pq_srcu, idx);
 	return reqs;
 }
 
@@ -420,7 +413,7 @@ static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma)
 		mapio = 1;
 		break;
 	case RCV_HDRQ:
-		memlen = rcvhdrq_size(uctxt);
+		memlen = uctxt->rcvhdrq_size;
 		memvirt = uctxt->rcvhdrq;
 		break;
 	case RCV_EGRBUF: {
@@ -497,7 +490,7 @@ static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma)
 		vmf = 1;
 		break;
 	case STATUS:
-		if (flags & VM_WRITE) {
+		if (flags & (unsigned long)(VM_WRITE | VM_EXEC)) {
 			ret = -EPERM;
 			goto done;
 		}
@@ -514,12 +507,12 @@ static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma)
 			ret = -EINVAL;
 			goto done;
 		}
-		if ((flags & VM_WRITE) || !hfi1_rcvhdrtail_kvaddr(uctxt)) {
+		if (flags & VM_WRITE) {
 			ret = -EPERM;
 			goto done;
 		}
 		memlen = PAGE_SIZE;
-		memvirt = (void *)hfi1_rcvhdrtail_kvaddr(uctxt);
+		memvirt = (void *)uctxt->rcvhdrtail_kvaddr;
 		flags &= ~VM_MAYWRITE;
 		break;
 	case SUBCTXT_UREGS:
@@ -530,7 +523,7 @@ static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma)
 		break;
 	case SUBCTXT_RCV_HDRQ:
 		memaddr = (u64)uctxt->subctxt_rcvhdr_base;
-		memlen = rcvhdrq_size(uctxt) * uctxt->subctxt_cnt;
+		memlen = uctxt->rcvhdrq_size * uctxt->subctxt_cnt;
 		flags |= VM_IO | VM_DONTEXPAND;
 		vmf = 1;
 		break;
@@ -600,7 +593,7 @@ done:
  * Local (non-chip) user memory is not mapped right away but as it is
  * accessed by the user-level code.
  */
-static vm_fault_t vma_fault(struct vm_fault *vmf)
+static int vma_fault(struct vm_fault *vmf)
 {
 	struct page *page;
 
@@ -614,20 +607,20 @@ static vm_fault_t vma_fault(struct vm_fault *vmf)
 	return 0;
 }
 
-static __poll_t hfi1_poll(struct file *fp, struct poll_table_struct *pt)
+static unsigned int hfi1_poll(struct file *fp, struct poll_table_struct *pt)
 {
 	struct hfi1_ctxtdata *uctxt;
-	__poll_t pollflag;
+	unsigned pollflag;
 
 	uctxt = ((struct hfi1_filedata *)fp->private_data)->uctxt;
 	if (!uctxt)
-		pollflag = EPOLLERR;
+		pollflag = POLLERR;
 	else if (uctxt->poll_type == HFI1_POLL_TYPE_URGENT)
 		pollflag = poll_urgent(fp, pt);
 	else  if (uctxt->poll_type == HFI1_POLL_TYPE_ANYRCV)
 		pollflag = poll_next(fp, pt);
 	else /* invalid */
-		pollflag = EPOLLERR;
+		pollflag = POLLERR;
 
 	return pollflag;
 }
@@ -690,8 +683,7 @@ static int hfi1_file_close(struct inode *inode, struct file *fp)
 		     HFI1_RCVCTRL_TAILUPD_DIS |
 		     HFI1_RCVCTRL_ONE_PKT_EGR_DIS |
 		     HFI1_RCVCTRL_NO_RHQ_DROP_DIS |
-		     HFI1_RCVCTRL_NO_EGR_DROP_DIS |
-		     HFI1_RCVCTRL_URGENT_DIS, uctxt);
+		     HFI1_RCVCTRL_NO_EGR_DROP_DIS, uctxt);
 	/* Clear the context's J_KEY */
 	hfi1_clear_ctxt_jkey(dd, uctxt);
 	/*
@@ -699,8 +691,8 @@ static int hfi1_file_close(struct inode *inode, struct file *fp)
 	 * checks to default and disable the send context.
 	 */
 	if (uctxt->sc) {
-		sc_disable(uctxt->sc);
 		set_pio_integrity(uctxt->sc);
+		sc_disable(uctxt->sc);
 	}
 
 	hfi1_free_ctxt_rcv_groups(uctxt);
@@ -710,11 +702,12 @@ static int hfi1_file_close(struct inode *inode, struct file *fp)
 
 	deallocate_ctxt(uctxt);
 done:
+	mmdrop(fdata->mm);
+	kobject_put(&dd->kobj);
 
 	if (atomic_dec_and_test(&dd->user_refcount))
 		complete(&dd->user_comp);
 
-	cleanup_srcu_struct(&fdata->pq_srcu);
 	kfree(fdata);
 	return 0;
 }
@@ -994,11 +987,7 @@ static int allocate_ctxt(struct hfi1_filedata *fd, struct hfi1_devdata *dd,
 	 * sub contexts.
 	 * This has to be done here so the rest of the sub-contexts find the
 	 * proper base context.
-	 * NOTE: _set_bit() can be used here because the context creation is
-	 * protected by the mutex (rather than the spin_lock), and will be the
-	 * very first instance of this context.
 	 */
-	__set_bit(0, uctxt->in_use_ctxts);
 	if (uinfo->subctxt_cnt)
 		init_subctxts(uctxt, uinfo);
 	uctxt->userversion = uinfo->userversion;
@@ -1053,7 +1042,7 @@ static int setup_subctxt(struct hfi1_ctxtdata *uctxt)
 		return -ENOMEM;
 
 	/* We can take the size of the RcvHdr Queue from the master */
-	uctxt->subctxt_rcvhdr_base = vmalloc_user(rcvhdrq_size(uctxt) *
+	uctxt->subctxt_rcvhdr_base = vmalloc_user(uctxt->rcvhdrq_size *
 						  num_subctxts);
 	if (!uctxt->subctxt_rcvhdr_base) {
 		ret = -ENOMEM;
@@ -1098,14 +1087,13 @@ static void user_init(struct hfi1_ctxtdata *uctxt)
 	 * don't have to wait to be sure the DMA update has happened
 	 * (chip resets head/tail to 0 on transition to enable).
 	 */
-	if (hfi1_rcvhdrtail_kvaddr(uctxt))
+	if (uctxt->rcvhdrtail_kvaddr)
 		clear_rcvhdrtail(uctxt);
 
 	/* Setup J_KEY before enabling the context */
 	hfi1_set_ctxt_jkey(uctxt->dd, uctxt, uctxt->jkey);
 
 	rcvctrl_ops = HFI1_RCVCTRL_CTXT_ENB;
-	rcvctrl_ops |= HFI1_RCVCTRL_URGENT_ENB;
 	if (HFI1_CAP_UGET_MASK(uctxt->flags, HDRSUPP))
 		rcvctrl_ops |= HFI1_RCVCTRL_TIDFLOW_ENB;
 	/*
@@ -1146,7 +1134,7 @@ static int get_ctxt_info(struct hfi1_filedata *fd, unsigned long arg, u32 len)
 			HFI1_CAP_UGET_MASK(uctxt->flags, MASK) |
 			HFI1_CAP_KGET_MASK(uctxt->flags, K2U);
 	/* adjust flag if this fd is not able to cache */
-	if (!fd->use_mn)
+	if (!fd->handler)
 		cinfo.runtime_flags |= HFI1_CAP_TID_UNMAP; /* no caching */
 
 	cinfo.num_active = hfi1_count_active_units();
@@ -1162,12 +1150,12 @@ static int get_ctxt_info(struct hfi1_filedata *fd, unsigned long arg, u32 len)
 	cinfo.send_ctxt = uctxt->sc->hw_context;
 
 	cinfo.egrtids = uctxt->egrbufs.alloced;
-	cinfo.rcvhdrq_cnt = get_hdrq_cnt(uctxt);
-	cinfo.rcvhdrq_entsize = get_hdrqentsize(uctxt) << 2;
+	cinfo.rcvhdrq_cnt = uctxt->rcvhdrq_cnt;
+	cinfo.rcvhdrq_entsize = uctxt->rcvhdrqentsize << 2;
 	cinfo.sdma_ring_size = fd->cq->nentries;
 	cinfo.rcvegr_size = uctxt->egrbufs.rcvtid_size;
 
-	trace_hfi1_ctxt_info(uctxt->dd, uctxt->ctxt, fd->subctxt, &cinfo);
+	trace_hfi1_ctxt_info(uctxt->dd, uctxt->ctxt, fd->subctxt, cinfo);
 	if (copy_to_user((void __user *)arg, &cinfo, len))
 		return -EFAULT;
 
@@ -1262,7 +1250,7 @@ static int get_base_info(struct hfi1_filedata *fd, unsigned long arg, u32 len)
 	memset(&binfo, 0, sizeof(binfo));
 	binfo.hw_version = dd->revision;
 	binfo.sw_version = HFI1_KERN_SWVERSION;
-	binfo.bthqp = RVT_KDETH_QP_PREFIX;
+	binfo.bthqp = kdeth_qp;
 	binfo.jkey = uctxt->jkey;
 	/*
 	 * If more than 64 contexts are enabled the allocated credit
@@ -1437,19 +1425,19 @@ static int user_exp_rcv_invalid(struct hfi1_filedata *fd, unsigned long arg,
 	return ret;
 }
 
-static __poll_t poll_urgent(struct file *fp,
+static unsigned int poll_urgent(struct file *fp,
 				struct poll_table_struct *pt)
 {
 	struct hfi1_filedata *fd = fp->private_data;
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct hfi1_devdata *dd = uctxt->dd;
-	__poll_t pollflag;
+	unsigned pollflag;
 
 	poll_wait(fp, &uctxt->wait, pt);
 
 	spin_lock_irq(&dd->uctxt_lock);
 	if (uctxt->urgent != uctxt->urgent_poll) {
-		pollflag = EPOLLIN | EPOLLRDNORM;
+		pollflag = POLLIN | POLLRDNORM;
 		uctxt->urgent_poll = uctxt->urgent;
 	} else {
 		pollflag = 0;
@@ -1460,13 +1448,13 @@ static __poll_t poll_urgent(struct file *fp,
 	return pollflag;
 }
 
-static __poll_t poll_next(struct file *fp,
+static unsigned int poll_next(struct file *fp,
 			      struct poll_table_struct *pt)
 {
 	struct hfi1_filedata *fd = fp->private_data;
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct hfi1_devdata *dd = uctxt->dd;
-	__poll_t pollflag;
+	unsigned pollflag;
 
 	poll_wait(fp, &uctxt->wait, pt);
 
@@ -1476,7 +1464,7 @@ static __poll_t poll_next(struct file *fp,
 		hfi1_rcvctrl(dd, HFI1_RCVCTRL_INTRAVAIL_ENB, uctxt);
 		pollflag = 0;
 	} else {
-		pollflag = EPOLLIN | EPOLLRDNORM;
+		pollflag = POLLIN | POLLRDNORM;
 	}
 	spin_unlock_irq(&dd->uctxt_lock);
 
@@ -1551,7 +1539,7 @@ static int manage_rcvq(struct hfi1_ctxtdata *uctxt, u16 subctxt,
 		 * always resets it's tail register back to 0 on a
 		 * transition from disabled to enabled.
 		 */
-		if (hfi1_rcvhdrtail_kvaddr(uctxt))
+		if (uctxt->rcvhdrtail_kvaddr)
 			clear_rcvhdrtail(uctxt);
 		rcvctrl_op = HFI1_RCVCTRL_CTXT_ENB;
 	} else {
@@ -1692,7 +1680,7 @@ static int user_add(struct hfi1_devdata *dd)
 	snprintf(name, sizeof(name), "%s_%d", class_name(), dd->unit);
 	ret = hfi1_cdev_init(dd->unit, name, &hfi1_file_ops,
 			     &dd->user_cdev, &dd->user_device,
-			     true, &dd->verbs_dev.rdi.ibdev.dev.kobj);
+			     true, &dd->kobj);
 	if (ret)
 		user_remove(dd);
 

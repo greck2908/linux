@@ -15,7 +15,6 @@
 #include <linux/time.h>
 #include <linux/namei.h>
 #include <linux/poll.h>
-#include <linux/fiemap.h>
 
 static int bad_file_open(struct inode *inode, struct file *filp)
 {
@@ -127,7 +126,7 @@ static int bad_inode_fiemap(struct inode *inode,
 	return -EIO;
 }
 
-static int bad_inode_update_time(struct inode *inode, struct timespec64 *time,
+static int bad_inode_update_time(struct inode *inode, struct timespec *time,
 				 int flags)
 {
 	return -EIO;
@@ -135,7 +134,7 @@ static int bad_inode_update_time(struct inode *inode, struct timespec64 *time,
 
 static int bad_inode_atomic_open(struct inode *inode, struct dentry *dentry,
 				 struct file *file, unsigned int open_flag,
-				 umode_t create_mode)
+				 umode_t create_mode, int *opened)
 {
 	return -EIO;
 }

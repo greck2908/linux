@@ -1,8 +1,12 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
 /* AFS filesystem file handling
  *
  * Copyright (C) 2002, 2007 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version
+ * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/kernel.h>
@@ -13,7 +17,6 @@
 #include <linux/writeback.h>
 #include <linux/gfp.h>
 #include <linux/task_io_accounting_ops.h>
-#include <linux/mm.h>
 #include "internal.h"
 
 static int afs_file_mmap(struct file *file, struct vm_area_struct *vma);
@@ -27,13 +30,13 @@ static int afs_readpages(struct file *filp, struct address_space *mapping,
 
 const struct file_operations afs_file_operations = {
 	.open		= afs_open,
+	.flush		= afs_flush,
 	.release	= afs_release,
 	.llseek		= generic_file_llseek,
 	.read_iter	= generic_file_read_iter,
 	.write_iter	= afs_file_write,
 	.mmap		= afs_file_mmap,
 	.splice_read	= generic_file_splice_read,
-	.splice_write	= iter_file_splice_write,
 	.fsync		= afs_fsync,
 	.lock		= afs_lock,
 	.flock		= afs_flock,
@@ -70,7 +73,7 @@ static const struct vm_operations_struct afs_vm_ops = {
  */
 void afs_put_wb_key(struct afs_wb_key *wbk)
 {
-	if (wbk && refcount_dec_and_test(&wbk->usage)) {
+	if (refcount_dec_and_test(&wbk->usage)) {
 		key_put(wbk->key);
 		kfree(wbk);
 	}
@@ -119,7 +122,7 @@ int afs_open(struct inode *inode, struct file *file)
 	struct key *key;
 	int ret;
 
-	_enter("{%llx:%llu},", vnode->fid.vid, vnode->fid.vnode);
+	_enter("{%x:%u},", vnode->fid.vid, vnode->fid.vnode);
 
 	key = afs_request_key(vnode->volume->cell);
 	if (IS_ERR(key)) {
@@ -143,9 +146,6 @@ int afs_open(struct inode *inode, struct file *file)
 		if (ret < 0)
 			goto error_af;
 	}
-
-	if (file->f_flags & O_TRUNC)
-		set_bit(AFS_VNODE_NEW_CONTENT, &vnode->flags);
 	
 	file->private_data = af;
 	_leave(" = 0");
@@ -167,12 +167,8 @@ int afs_release(struct inode *inode, struct file *file)
 {
 	struct afs_vnode *vnode = AFS_FS_I(inode);
 	struct afs_file *af = file->private_data;
-	int ret = 0;
 
-	_enter("{%llx:%llu},", vnode->fid.vid, vnode->fid.vnode);
-
-	if ((file->f_mode & FMODE_WRITE))
-		ret = vfs_fsync(file, 0);
+	_enter("{%x:%u},", vnode->fid.vid, vnode->fid.vnode);
 
 	file->private_data = NULL;
 	if (af->wb)
@@ -180,8 +176,8 @@ int afs_release(struct inode *inode, struct file *file)
 	key_put(af->key);
 	kfree(af);
 	afs_prune_wb_keys(vnode);
-	_leave(" = %d", ret);
-	return ret;
+	_leave(" = 0");
+	return 0;
 }
 
 /*
@@ -191,14 +187,10 @@ void afs_put_read(struct afs_read *req)
 {
 	int i;
 
-	if (refcount_dec_and_test(&req->usage)) {
-		if (req->pages) {
-			for (i = 0; i < req->nr_pages; i++)
-				if (req->pages[i])
-					put_page(req->pages[i]);
-			if (req->pages != req->array)
-				kfree(req->pages);
-		}
+	if (atomic_dec_and_test(&req->usage)) {
+		for (i = 0; i < req->nr_pages; i++)
+			if (req->pages[i])
+				put_page(req->pages[i]);
 		kfree(req);
 	}
 }
@@ -221,52 +213,35 @@ static void afs_file_readpage_read_complete(struct page *page,
 }
 #endif
 
-static void afs_fetch_data_success(struct afs_operation *op)
-{
-	struct afs_vnode *vnode = op->file[0].vnode;
-
-	_enter("op=%08x", op->debug_id);
-	afs_vnode_commit_status(op, &op->file[0]);
-	afs_stat_v(vnode, n_fetches);
-	atomic_long_add(op->fetch.req->actual_len, &op->net->n_fetch_bytes);
-}
-
-static void afs_fetch_data_put(struct afs_operation *op)
-{
-	afs_put_read(op->fetch.req);
-}
-
-static const struct afs_operation_ops afs_fetch_data_operation = {
-	.issue_afs_rpc	= afs_fs_fetch_data,
-	.issue_yfs_rpc	= yfs_fs_fetch_data,
-	.success	= afs_fetch_data_success,
-	.aborted	= afs_check_for_remote_deletion,
-	.put		= afs_fetch_data_put,
-};
-
 /*
  * Fetch file data from the volume.
  */
-int afs_fetch_data(struct afs_vnode *vnode, struct key *key, struct afs_read *req)
+int afs_fetch_data(struct afs_vnode *vnode, struct key *key, struct afs_read *desc)
 {
-	struct afs_operation *op;
+	struct afs_fs_cursor fc;
+	int ret;
 
-	_enter("%s{%llx:%llu.%u},%x,,,",
+	_enter("%s{%x:%u.%u},%x,,,",
 	       vnode->volume->name,
 	       vnode->fid.vid,
 	       vnode->fid.vnode,
 	       vnode->fid.unique,
 	       key_serial(key));
 
-	op = afs_alloc_operation(key, vnode->volume);
-	if (IS_ERR(op))
-		return PTR_ERR(op);
+	ret = -ERESTARTSYS;
+	if (afs_begin_vnode_operation(&fc, vnode, key)) {
+		while (afs_select_fileserver(&fc)) {
+			fc.cb_break = vnode->cb_break + vnode->cb_s_break;
+			afs_fs_fetch_data(&fc, desc);
+		}
 
-	afs_op_set_vnode(op, 0, vnode);
+		afs_check_for_remote_deletion(&fc, fc.vnode);
+		afs_vnode_commit_status(&fc, vnode, fc.cb_break);
+		ret = afs_end_vnode_operation(&fc);
+	}
 
-	op->fetch.req	= afs_get_read(req);
-	op->ops		= &afs_fetch_data_operation;
-	return afs_do_sync_operation(op);
+	_leave(" = %d", ret);
+	return ret;
 }
 
 /*
@@ -311,11 +286,10 @@ int afs_page_filler(void *data, struct page *page)
 		/* page will not be cached */
 	case -ENOBUFS:
 		_debug("cache said ENOBUFS");
-
-		fallthrough;
 	default:
 	go_on:
-		req = kzalloc(struct_size(req, array, 1), GFP_KERNEL);
+		req = kzalloc(sizeof(struct afs_read) + sizeof(struct page *),
+			      GFP_KERNEL);
 		if (!req)
 			goto enomem;
 
@@ -323,11 +297,10 @@ int afs_page_filler(void *data, struct page *page)
 		 * end of the file, the server will return a short read and the
 		 * unmarshalling code will clear the unfilled space.
 		 */
-		refcount_set(&req->usage, 1);
+		atomic_set(&req->usage, 1);
 		req->pos = (loff_t)page->index << PAGE_SHIFT;
 		req->len = PAGE_SIZE;
 		req->nr_pages = 1;
-		req->pages = req->array;
 		req->pages[0] = page;
 		get_page(page);
 
@@ -335,6 +308,10 @@ int afs_page_filler(void *data, struct page *page)
 		 * page */
 		ret = afs_fetch_data(vnode, key, req);
 		afs_put_read(req);
+
+		if (ret >= 0 && S_ISDIR(inode->i_mode) &&
+		    !afs_dir_check_page(inode, page))
+			ret = -EIO;
 
 		if (ret < 0) {
 			if (ret == -ENOENT) {
@@ -362,8 +339,7 @@ int afs_page_filler(void *data, struct page *page)
 		/* send the page to the cache */
 #ifdef CONFIG_AFS_FSCACHE
 		if (PageFsCache(page) &&
-		    fscache_write_page(vnode->cache, page, vnode->status.size,
-				       GFP_KERNEL) != 0) {
+		    fscache_write_page(vnode->cache, page, GFP_KERNEL) != 0) {
 			fscache_uncache_page(vnode->cache, page);
 			BUG_ON(PageFsCache(page));
 		}
@@ -414,10 +390,10 @@ static int afs_readpage(struct file *file, struct page *page)
 /*
  * Make pages available as they're filled.
  */
-static void afs_readpages_page_done(struct afs_read *req)
+static void afs_readpages_page_done(struct afs_call *call, struct afs_read *req)
 {
 #ifdef CONFIG_AFS_FSCACHE
-	struct afs_vnode *vnode = req->vnode;
+	struct afs_vnode *vnode = call->reply[0];
 #endif
 	struct page *page = req->pages[req->index];
 
@@ -427,8 +403,7 @@ static void afs_readpages_page_done(struct afs_read *req)
 	/* send the page to the cache */
 #ifdef CONFIG_AFS_FSCACHE
 	if (PageFsCache(page) &&
-	    fscache_write_page(vnode->cache, page, vnode->status.size,
-			       GFP_KERNEL) != 0) {
+	    fscache_write_page(vnode->cache, page, GFP_KERNEL) != 0) {
 		fscache_uncache_page(vnode->cache, page);
 		BUG_ON(PageFsCache(page));
 	}
@@ -454,7 +429,7 @@ static int afs_readpages_one(struct file *file, struct address_space *mapping,
 	/* Count the number of contiguous pages at the front of the list.  Note
 	 * that the list goes prev-wards rather than next-wards.
 	 */
-	first = lru_to_page(pages);
+	first = list_entry(pages->prev, struct page, lru);
 	index = first->index + 1;
 	n = 1;
 	for (p = first->lru.prev; p != pages; p = p->prev) {
@@ -465,16 +440,15 @@ static int afs_readpages_one(struct file *file, struct address_space *mapping,
 		n++;
 	}
 
-	req = kzalloc(struct_size(req, array, n), GFP_NOFS);
+	req = kzalloc(sizeof(struct afs_read) + sizeof(struct page *) * n,
+		      GFP_NOFS);
 	if (!req)
 		return -ENOMEM;
 
-	refcount_set(&req->usage, 1);
-	req->vnode = vnode;
+	atomic_set(&req->usage, 1);
 	req->page_done = afs_readpages_page_done;
 	req->pos = first->index;
 	req->pos <<= PAGE_SHIFT;
-	req->pages = req->array;
 
 	/* Transfer the pages to the request.  We add them in until one fails
 	 * to add to the LRU and then we stop (as that'll make a hole in the
@@ -486,7 +460,7 @@ static int afs_readpages_one(struct file *file, struct address_space *mapping,
 	 * page at the end of the file.
 	 */
 	do {
-		page = lru_to_page(pages);
+		page = list_entry(pages->prev, struct page, lru);
 		list_del(&page->lru);
 		index = page->index;
 		if (add_to_page_cache_lru(page, mapping, index,
@@ -602,63 +576,6 @@ static int afs_readpages(struct file *file, struct address_space *mapping,
 }
 
 /*
- * Adjust the dirty region of the page on truncation or full invalidation,
- * getting rid of the markers altogether if the region is entirely invalidated.
- */
-static void afs_invalidate_dirty(struct page *page, unsigned int offset,
-				 unsigned int length)
-{
-	struct afs_vnode *vnode = AFS_FS_I(page->mapping->host);
-	unsigned long priv;
-	unsigned int f, t, end = offset + length;
-
-	priv = page_private(page);
-
-	/* we clean up only if the entire page is being invalidated */
-	if (offset == 0 && length == thp_size(page))
-		goto full_invalidate;
-
-	 /* If the page was dirtied by page_mkwrite(), the PTE stays writable
-	  * and we don't get another notification to tell us to expand it
-	  * again.
-	  */
-	if (afs_is_page_dirty_mmapped(priv))
-		return;
-
-	/* We may need to shorten the dirty region */
-	f = afs_page_dirty_from(priv);
-	t = afs_page_dirty_to(priv);
-
-	if (t <= offset || f >= end)
-		return; /* Doesn't overlap */
-
-	if (f < offset && t > end)
-		return; /* Splits the dirty region - just absorb it */
-
-	if (f >= offset && t <= end)
-		goto undirty;
-
-	if (f < offset)
-		t = offset;
-	else
-		f = end;
-	if (f == t)
-		goto undirty;
-
-	priv = afs_page_dirty(f, t);
-	set_page_private(page, priv);
-	trace_afs_page_dirty(vnode, tracepoint_string("trunc"), page->index, priv);
-	return;
-
-undirty:
-	trace_afs_page_dirty(vnode, tracepoint_string("undirty"), page->index, priv);
-	clear_page_dirty_for_io(page);
-full_invalidate:
-	priv = (unsigned long)detach_page_private(page);
-	trace_afs_page_dirty(vnode, tracepoint_string("inval"), page->index, priv);
-}
-
-/*
  * invalidate part or all of a page
  * - release a page and clean up its private data if offset is 0 (indicating
  *   the entire page)
@@ -666,23 +583,31 @@ full_invalidate:
 static void afs_invalidatepage(struct page *page, unsigned int offset,
 			       unsigned int length)
 {
+	struct afs_vnode *vnode = AFS_FS_I(page->mapping->host);
+	unsigned long priv;
+
 	_enter("{%lu},%u,%u", page->index, offset, length);
 
 	BUG_ON(!PageLocked(page));
 
-#ifdef CONFIG_AFS_FSCACHE
 	/* we clean up only if the entire page is being invalidated */
 	if (offset == 0 && length == PAGE_SIZE) {
+#ifdef CONFIG_AFS_FSCACHE
 		if (PageFsCache(page)) {
 			struct afs_vnode *vnode = AFS_FS_I(page->mapping->host);
 			fscache_wait_on_page_write(vnode->cache, page);
 			fscache_uncache_page(vnode->cache, page);
 		}
-	}
 #endif
 
-	if (PagePrivate(page))
-		afs_invalidate_dirty(page, offset, length);
+		if (PagePrivate(page)) {
+			priv = page_private(page);
+			trace_afs_page_dirty(vnode, tracepoint_string("inval"),
+					     page->index, priv);
+			set_page_private(page, 0);
+			ClearPagePrivate(page);
+		}
+	}
 
 	_leave("");
 }
@@ -696,7 +621,7 @@ static int afs_releasepage(struct page *page, gfp_t gfp_flags)
 	struct afs_vnode *vnode = AFS_FS_I(page->mapping->host);
 	unsigned long priv;
 
-	_enter("{{%llx:%llu}[%lu],%lx},%x",
+	_enter("{{%x:%u}[%lu],%lx},%x",
 	       vnode->fid.vid, vnode->fid.vnode, page->index, page->flags,
 	       gfp_flags);
 
@@ -710,9 +635,11 @@ static int afs_releasepage(struct page *page, gfp_t gfp_flags)
 #endif
 
 	if (PagePrivate(page)) {
-		priv = (unsigned long)detach_page_private(page);
+		priv = page_private(page);
 		trace_afs_page_dirty(vnode, tracepoint_string("rel"),
 				     page->index, priv);
+		set_page_private(page, 0);
+		ClearPagePrivate(page);
 	}
 
 	/* indicate that the page can be released */

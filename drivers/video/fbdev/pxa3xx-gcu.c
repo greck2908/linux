@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  pxa3xx-gcu.c - Linux kernel module for PXA3xx graphics controllers
  *
@@ -8,6 +7,20 @@
  *  Copyright (c) 2009 Daniel Mack <daniel@caiaq.de>
  *  Copyright (c) 2009 Janine Kropp <nin@directfb.org>
  *  Copyright (c) 2009 Denis Oliver Kropp <dok@directfb.org>
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 /*
@@ -31,11 +44,11 @@
 #include <linux/clk.h>
 #include <linux/fs.h>
 #include <linux/io.h>
-#include <linux/of.h>
 
 #include "pxa3xx-gcu.h"
 
 #define DRV_NAME	"pxa3xx-gcu"
+#define MISCDEV_MINOR	197
 
 #define REG_GCCR	0x00
 #define GCCR_SYNC_CLR	(1 << 9)
@@ -82,7 +95,6 @@ struct pxa3xx_gcu_batch {
 };
 
 struct pxa3xx_gcu_priv {
-	struct device		 *dev;
 	void __iomem		 *mmio_base;
 	struct clk		 *clk;
 	struct pxa3xx_gcu_shared *shared;
@@ -92,7 +104,7 @@ struct pxa3xx_gcu_priv {
 	wait_queue_head_t	  wait_idle;
 	wait_queue_head_t	  wait_free;
 	spinlock_t		  spinlock;
-	struct timespec64	  base_time;
+	struct timeval 		  base_time;
 
 	struct pxa3xx_gcu_batch *free;
 	struct pxa3xx_gcu_batch *ready;
@@ -114,20 +126,18 @@ gc_writel(struct pxa3xx_gcu_priv *priv, unsigned int off, unsigned long val)
 
 #define QPRINT(priv, level, msg)					\
 	do {								\
-		struct timespec64 ts;					\
+		struct timeval tv;					\
 		struct pxa3xx_gcu_shared *shared = priv->shared;	\
 		u32 base = gc_readl(priv, REG_GCRBBR);			\
 									\
-		ktime_get_ts64(&ts);					\
-		ts = timespec64_sub(ts, priv->base_time);		\
+		do_gettimeofday(&tv);					\
 									\
-		printk(level "%lld.%03ld.%03ld - %-17s: %-21s (%s, "	\
+		printk(level "%ld.%03ld.%03ld - %-17s: %-21s (%s, "	\
 			"STATUS "					\
 			"0x%02lx, B 0x%08lx [%ld], E %5ld, H %5ld, "	\
 			"T %5ld)\n",					\
-			(s64)(ts.tv_sec),				\
-			ts.tv_nsec / NSEC_PER_MSEC,			\
-			(ts.tv_nsec % NSEC_PER_MSEC) / USEC_PER_MSEC,	\
+			tv.tv_sec - priv->base_time.tv_sec,		\
+			tv.tv_usec / 1000, tv.tv_usec % 1000,		\
 			__func__, msg,					\
 			shared->hw_running ? "running" : "   idle",	\
 			gc_readl(priv, REG_GCISCR),			\
@@ -154,7 +164,7 @@ pxa3xx_gcu_reset(struct pxa3xx_gcu_priv *priv)
 	priv->shared->buffer_phys = priv->shared_phys;
 	priv->shared->magic = PXA3XX_GCU_SHARED_MAGIC;
 
-	ktime_get_ts64(&priv->base_time);
+	do_gettimeofday(&priv->base_time);
 
 	/* set up the ring buffer pointers */
 	gc_writel(priv, REG_GCRBLR, 0);
@@ -480,7 +490,7 @@ pxa3xx_gcu_mmap(struct file *file, struct vm_area_struct *vma)
 		if (size != SHARED_SIZE)
 			return -EINVAL;
 
-		return dma_mmap_coherent(priv->dev, vma,
+		return dma_mmap_coherent(NULL, vma,
 			priv->shared, priv->shared_phys, size);
 
 	case SHARED_SIZE >> PAGE_SHIFT:
@@ -594,7 +604,7 @@ static int pxa3xx_gcu_probe(struct platform_device *pdev)
 	 * container_of(). This isn't really necessary as we have a fixed minor
 	 * number anyway, but this is to avoid statics. */
 
-	priv->misc_dev.minor	= PXA3XX_GCU_MINOR,
+	priv->misc_dev.minor	= MISCDEV_MINOR,
 	priv->misc_dev.name	= DRV_NAME,
 	priv->misc_dev.fops	= &pxa3xx_gcu_miscdev_fops;
 
@@ -637,7 +647,7 @@ static int pxa3xx_gcu_probe(struct platform_device *pdev)
 	ret = misc_register(&priv->misc_dev);
 	if (ret < 0) {
 		dev_err(dev, "misc_register() for minor %d failed\n",
-			PXA3XX_GCU_MINOR);
+			MISCDEV_MINOR);
 		goto err_free_dma;
 	}
 
@@ -657,7 +667,6 @@ static int pxa3xx_gcu_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, priv);
 	priv->resource_mem = r;
-	priv->dev = dev;
 	pxa3xx_gcu_reset(priv);
 	pxa3xx_gcu_init_debug_timer(priv);
 
@@ -692,20 +701,11 @@ static int pxa3xx_gcu_remove(struct platform_device *pdev)
 	return 0;
 }
 
-#ifdef CONFIG_OF
-static const struct of_device_id pxa3xx_gcu_of_match[] = {
-	{ .compatible = "marvell,pxa300-gcu", },
-	{ }
-};
-MODULE_DEVICE_TABLE(of, pxa3xx_gcu_of_match);
-#endif
-
 static struct platform_driver pxa3xx_gcu_driver = {
 	.probe	  = pxa3xx_gcu_probe,
 	.remove	 = pxa3xx_gcu_remove,
 	.driver	 = {
 		.name   = DRV_NAME,
-		.of_match_table = of_match_ptr(pxa3xx_gcu_of_match),
 	},
 };
 
@@ -713,7 +713,7 @@ module_platform_driver(pxa3xx_gcu_driver);
 
 MODULE_DESCRIPTION("PXA3xx graphics controller unit driver");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(PXA3XX_GCU_MINOR);
+MODULE_ALIAS_MISCDEV(MISCDEV_MINOR);
 MODULE_AUTHOR("Janine Kropp <nin@directfb.org>, "
 		"Denis Oliver Kropp <dok@directfb.org>, "
 		"Daniel Mack <daniel@caiaq.de>");

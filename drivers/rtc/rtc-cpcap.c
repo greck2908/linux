@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Motorola CPCAP PMIC RTC driver
  *
@@ -13,10 +12,18 @@
  *  - remove custom "secure clock daemon" helpers
  *
  * Copyright (C) 2017 Sebastian Reichel <sre@kernel.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/init.h>
 #include <linux/device.h>
 #include <linux/platform_device.h>
@@ -56,14 +63,14 @@ static void cpcap2rtc_time(struct rtc_time *rtc, struct cpcap_time *cpcap)
 	tod = (cpcap->tod1 & TOD1_MASK) | ((cpcap->tod2 & TOD2_MASK) << 8);
 	time = tod + ((cpcap->day & DAY_MASK) * SECS_PER_DAY);
 
-	rtc_time64_to_tm(time, rtc);
+	rtc_time_to_tm(time, rtc);
 }
 
 static void rtc2cpcap_time(struct cpcap_time *cpcap, struct rtc_time *rtc)
 {
 	unsigned long time;
 
-	time = rtc_tm_to_time64(rtc);
+	rtc_tm_to_time(rtc, &time);
 
 	cpcap->day = time / SECS_PER_DAY;
 	time %= SECS_PER_DAY;
@@ -112,7 +119,7 @@ static int cpcap_rtc_read_time(struct device *dev, struct rtc_time *tm)
 
 	cpcap2rtc_time(tm, &cpcap_tm);
 
-	return 0;
+	return rtc_valid_tm(tm);
 }
 
 static int cpcap_rtc_set_time(struct device *dev, struct rtc_time *tm)
@@ -256,12 +263,11 @@ static int cpcap_rtc_probe(struct platform_device *pdev)
 		return -ENODEV;
 
 	platform_set_drvdata(pdev, rtc);
-	rtc->rtc_dev = devm_rtc_allocate_device(dev);
+	rtc->rtc_dev = devm_rtc_device_register(dev, "cpcap_rtc",
+						&cpcap_rtc_ops, THIS_MODULE);
+
 	if (IS_ERR(rtc->rtc_dev))
 		return PTR_ERR(rtc->rtc_dev);
-
-	rtc->rtc_dev->ops = &cpcap_rtc_ops;
-	rtc->rtc_dev->range_max = (timeu64_t) (DAY_MASK + 1) * SECS_PER_DAY - 1;
 
 	err = cpcap_get_vendor(dev, rtc->regmap, &rtc->vendor);
 	if (err)
@@ -299,7 +305,7 @@ static int cpcap_rtc_probe(struct platform_device *pdev)
 		/* ignore error and continue without wakeup support */
 	}
 
-	return rtc_register_device(rtc->rtc_dev);
+	return 0;
 }
 
 static const struct of_device_id cpcap_rtc_of_match[] = {

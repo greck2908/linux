@@ -16,10 +16,7 @@
 #include <unistd.h>
 #include <string.h>
 
-#include "../kselftest.h"
-
-#define MAP_SIZE_MB	100
-#define MAP_SIZE	(MAP_SIZE_MB * 1024 * 1024)
+#define MAP_SIZE 1048576
 
 struct map_list {
 	void *map;
@@ -140,8 +137,6 @@ int check_compaction(unsigned long mem_free, unsigned int hugepage_size)
 	printf("No of huge pages allocated = %d\n",
 	       (atoi(nr_hugepages)));
 
-	lseek(fd, 0, SEEK_SET);
-
 	if (write(fd, initial_nr_hugepages, strlen(initial_nr_hugepages))
 	    != strlen(initial_nr_hugepages)) {
 		perror("Failed to write value to /proc/sys/vm/nr_hugepages\n");
@@ -166,13 +161,13 @@ int main(int argc, char **argv)
 	void *map = NULL;
 	unsigned long mem_free = 0;
 	unsigned long hugepage_size = 0;
-	long mem_fragmentable_MB = 0;
+	unsigned long mem_fragmentable = 0;
 
 	if (prereq() != 0) {
 		printf("Either the sysctl compact_unevictable_allowed is not\n"
 		       "set to 1 or couldn't read the proc file.\n"
 		       "Skipping the test\n");
-		return KSFT_SKIP;
+		return 0;
 	}
 
 	lim.rlim_cur = RLIM_INFINITY;
@@ -191,9 +186,9 @@ int main(int argc, char **argv)
 		return -1;
 	}
 
-	mem_fragmentable_MB = mem_free * 0.8 / 1024;
+	mem_fragmentable = mem_free * 0.8 / 1024;
 
-	while (mem_fragmentable_MB > 0) {
+	while (mem_fragmentable > 0) {
 		map = mmap(NULL, MAP_SIZE, PROT_READ | PROT_WRITE,
 			   MAP_ANONYMOUS | MAP_PRIVATE | MAP_LOCKED, -1, 0);
 		if (map == MAP_FAILED)
@@ -214,7 +209,7 @@ int main(int argc, char **argv)
 		for (i = 0; i < MAP_SIZE; i += page_size)
 			*(unsigned long *)(map + i) = (unsigned long)map + i;
 
-		mem_fragmentable_MB -= MAP_SIZE_MB;
+		mem_fragmentable--;
 	}
 
 	for (entry = list; entry != NULL; entry = entry->next) {

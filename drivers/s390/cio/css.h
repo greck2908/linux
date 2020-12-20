@@ -72,6 +72,11 @@ struct chp_link;
  * @probe: function called on probe
  * @remove: function called on remove
  * @shutdown: called at device shutdown
+ * @prepare: prepare for pm state transition
+ * @complete: undo work done in @prepare
+ * @freeze: callback for freezing during hibernation snapshotting
+ * @thaw: undo work done in @freeze
+ * @restore: callback for restoring after hibernation
  * @settle: wait for asynchronous work to finish
  */
 struct css_driver {
@@ -83,6 +88,11 @@ struct css_driver {
 	int (*probe)(struct subchannel *);
 	int (*remove)(struct subchannel *);
 	void (*shutdown)(struct subchannel *);
+	int (*prepare) (struct subchannel *);
+	void (*complete) (struct subchannel *);
+	int (*freeze)(struct subchannel *);
+	int (*thaw) (struct subchannel *);
+	int (*restore)(struct subchannel *);
 	int (*settle)(void);
 };
 
@@ -93,8 +103,7 @@ extern void css_driver_unregister(struct css_driver *);
 
 extern void css_sch_device_unregister(struct subchannel *);
 extern int css_register_subchannel(struct subchannel *);
-extern struct subchannel *css_alloc_subchannel(struct subchannel_id,
-					       struct schib *schib);
+extern struct subchannel *css_alloc_subchannel(struct subchannel_id);
 extern struct subchannel *get_subchannel_by_schid(struct subchannel_id);
 extern int css_init_done;
 extern int max_ssid;
@@ -105,9 +114,7 @@ extern int for_each_subchannel(int(*fn)(struct subchannel_id, void *), void *);
 void css_update_ssd_info(struct subchannel *sch);
 
 struct channel_subsystem {
-	u8 cssid;
-	u8 iid;
-	bool id_valid; /* cssid,iid */
+	int cssid;
 	struct channel_path *chps[__MAX_CHPID + 1];
 	struct device device;
 	struct pgid global_pgid;

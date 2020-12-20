@@ -11,12 +11,11 @@
  * otherwise leak kernel stack to userland if they aren't properly initialized
  * by later code
  *
- * Homepage: https://pax.grsecurity.net/
+ * Homepage: http://pax.grsecurity.net/
  *
  * Options:
  * -fplugin-arg-structleak_plugin-disable
  * -fplugin-arg-structleak_plugin-verbose
- * -fplugin-arg-structleak_plugin-byref
  * -fplugin-arg-structleak_plugin-byref-all
  *
  * Usage:
@@ -27,6 +26,7 @@
  * $ gcc -fplugin=./structleak_plugin.so test.c -O2
  *
  * TODO: eliminate redundant initializers
+ *       increase type coverage
  */
 
 #include "gcc-common.h"
@@ -37,18 +37,13 @@
 __visible int plugin_is_GPL_compatible;
 
 static struct plugin_info structleak_plugin_info = {
-	.version	= "20190125vanilla",
+	.version	= "201607271510vanilla",
 	.help		= "disable\tdo not activate plugin\n"
-			  "byref\tinit structs passed by reference\n"
-			  "byref-all\tinit anything passed by reference\n"
-			  "verbose\tprint all initialized variables\n",
+			   "verbose\tprint all initialized variables\n",
 };
 
-#define BYREF_STRUCT	1
-#define BYREF_ALL	2
-
 static bool verbose;
-static int byref;
+static bool byref_all;
 
 static tree handle_user_attribute(tree *node, tree name, tree args, int flags, bool *no_add_attrs)
 {
@@ -62,14 +57,21 @@ static tree handle_user_attribute(tree *node, tree name, tree args, int flags, b
 	return NULL_TREE;
 }
 
-static struct attribute_spec user_attr = { };
+static struct attribute_spec user_attr = {
+	.name			= "user",
+	.min_length		= 0,
+	.max_length		= 0,
+	.decl_required		= false,
+	.type_required		= false,
+	.function_type_required	= false,
+	.handler		= handle_user_attribute,
+#if BUILDING_GCC_VERSION >= 4007
+	.affects_type_identity	= true
+#endif
+};
 
 static void register_attributes(void *event_data, void *data)
 {
-	user_attr.name			= "user";
-	user_attr.handler		= handle_user_attribute;
-	user_attr.affects_type_identity	= true;
-
 	register_attribute(&user_attr);
 }
 
@@ -121,7 +123,6 @@ static void initialize(tree var)
 	gimple_stmt_iterator gsi;
 	tree initializer;
 	gimple init_stmt;
-	tree type;
 
 	/* this is the original entry bb before the forced split */
 	bb = single_succ(ENTRY_BLOCK_PTR_FOR_FN(cfun));
@@ -135,9 +136,11 @@ static void initialize(tree var)
 		if (!gimple_assign_single_p(stmt))
 			continue;
 		rhs1 = gimple_assign_rhs1(stmt);
+#if BUILDING_GCC_VERSION >= 4007
 		/* ... of a non-clobbering expression... */
 		if (TREE_CLOBBER_P(rhs1))
 			continue;
+#endif
 		/* ... to our variable... */
 		if (gimple_get_lhs(stmt) != var)
 			continue;
@@ -150,15 +153,11 @@ static void initialize(tree var)
 	if (verbose)
 		inform(DECL_SOURCE_LOCATION(var),
 			"%s variable will be forcibly initialized",
-			(byref && TREE_ADDRESSABLE(var)) ? "byref"
-							 : "userspace");
+			(byref_all && TREE_ADDRESSABLE(var)) ? "byref"
+							     : "userspace");
 
 	/* build the initializer expression */
-	type = TREE_TYPE(var);
-	if (AGGREGATE_TYPE_P(type))
-		initializer = build_constructor(type, NULL);
-	else
-		initializer = fold_convert(type, integer_zero_node);
+	initializer = build_constructor(TREE_TYPE(var), NULL);
 
 	/* build the initializer stmt */
 	init_stmt = gimple_build_assign(var, initializer);
@@ -190,13 +189,13 @@ static unsigned int structleak_execute(void)
 		if (!auto_var_in_fn_p(var, current_function_decl))
 			continue;
 
-		/* only care about structure types unless byref-all */
-		if (byref != BYREF_ALL && TREE_CODE(type) != RECORD_TYPE && TREE_CODE(type) != UNION_TYPE)
+		/* only care about structure types */
+		if (TREE_CODE(type) != RECORD_TYPE && TREE_CODE(type) != UNION_TYPE)
 			continue;
 
 		/* if the type is of interest, examine the variable */
 		if (TYPE_USERSPACE(type) ||
-		    (byref && TREE_ADDRESSABLE(var)))
+		    (byref_all && TREE_ADDRESSABLE(var)))
 			initialize(var);
 	}
 
@@ -238,12 +237,8 @@ __visible int plugin_init(struct plugin_name_args *plugin_info, struct plugin_gc
 			verbose = true;
 			continue;
 		}
-		if (!strcmp(argv[i].key, "byref")) {
-			byref = BYREF_STRUCT;
-			continue;
-		}
 		if (!strcmp(argv[i].key, "byref-all")) {
-			byref = BYREF_ALL;
+			byref_all = true;
 			continue;
 		}
 		error(G_("unknown option '-fplugin-arg-%s-%s'"), plugin_name, argv[i].key);

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * CIPSO - Commercial IP Security Option
  *
@@ -10,15 +9,30 @@
  *
  * The CIPSO draft specification can be found in the kernel's Documentation
  * directory as well as the following URL:
- *   https://tools.ietf.org/id/draft-ietf-cipso-ipsecurity-01.txt
+ *   http://tools.ietf.org/id/draft-ietf-cipso-ipsecurity-01.txt
  * The FIPS-188 specification can be found at the following URL:
- *   https://www.itl.nist.gov/fipspubs/fip188.htm
+ *   http://www.itl.nist.gov/fipspubs/fip188.htm
  *
  * Author: Paul Moore <paul.moore@hp.com>
+ *
  */
 
 /*
  * (c) Copyright Hewlett-Packard Development Company, L.P., 2006, 2008
+ *
+ * This program is free software;  you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY;  without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
+ * the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program;  if not, see <http://www.gnu.org/licenses/>.
+ *
  */
 
 #include <linux/init.h>
@@ -283,7 +297,7 @@ static int cipso_v4_cache_check(const unsigned char *key,
 
 /**
  * cipso_v4_cache_add - Add an entry to the CIPSO cache
- * @cipso_ptr: pointer to CIPSO IP option
+ * @skb: the packet
  * @secattr: the packet's security attributes
  *
  * Description:
@@ -498,7 +512,7 @@ static void cipso_v4_doi_free_rcu(struct rcu_head *entry)
 /**
  * cipso_v4_doi_remove - Remove an existing DOI from the CIPSO protocol engine
  * @doi: the DOI value
- * @audit_info: NetLabel audit information
+ * @audit_secid: the LSM secid to use in the audit message
  *
  * Description:
  * Removes a DOI definition from the CIPSO engine.  The NetLabel routines will
@@ -653,8 +667,7 @@ static int cipso_v4_map_lvl_valid(const struct cipso_v4_doi *doi_def, u8 level)
 	case CIPSO_V4_MAP_PASS:
 		return 0;
 	case CIPSO_V4_MAP_TRANS:
-		if ((level < doi_def->map.std->lvl.cipso_size) &&
-		    (doi_def->map.std->lvl.cipso[level] < CIPSO_V4_INV_LVL))
+		if (doi_def->map.std->lvl.cipso[level] < CIPSO_V4_INV_LVL)
 			return 0;
 		break;
 	}
@@ -1258,8 +1271,7 @@ static int cipso_v4_parsetag_rbm(const struct cipso_v4_doi *doi_def,
 			return ret_val;
 		}
 
-		if (secattr->attr.mls.cat)
-			secattr->flags |= NETLBL_SECATTR_MLS_CAT;
+		secattr->flags |= NETLBL_SECATTR_MLS_CAT;
 	}
 
 	return 0;
@@ -1440,8 +1452,7 @@ static int cipso_v4_parsetag_rng(const struct cipso_v4_doi *doi_def,
 			return ret_val;
 		}
 
-		if (secattr->attr.mls.cat)
-			secattr->flags |= NETLBL_SECATTR_MLS_CAT;
+		secattr->flags |= NETLBL_SECATTR_MLS_CAT;
 	}
 
 	return 0;
@@ -1501,7 +1512,7 @@ static int cipso_v4_parsetag_loc(const struct cipso_v4_doi *doi_def,
  *
  * Description:
  * Parse the packet's IP header looking for a CIPSO option.  Returns a pointer
- * to the start of the CIPSO option on success, NULL if one is not found.
+ * to the start of the CIPSO option on success, NULL if one if not found.
  *
  */
 unsigned char *cipso_v4_optptr(const struct sk_buff *skb)
@@ -1511,8 +1522,10 @@ unsigned char *cipso_v4_optptr(const struct sk_buff *skb)
 	int optlen;
 	int taglen;
 
-	for (optlen = iph->ihl*4 - sizeof(struct iphdr); optlen > 1; ) {
+	for (optlen = iph->ihl*4 - sizeof(struct iphdr); optlen > 0; ) {
 		switch (optptr[0]) {
+		case IPOPT_CIPSO:
+			return optptr;
 		case IPOPT_END:
 			return NULL;
 		case IPOPT_NOOP:
@@ -1521,11 +1534,6 @@ unsigned char *cipso_v4_optptr(const struct sk_buff *skb)
 		default:
 			taglen = optptr[1];
 		}
-		if (!taglen || taglen > optlen)
-			return NULL;
-		if (optptr[0] == IPOPT_CIPSO)
-			return optptr;
-
 		optlen -= taglen;
 		optptr += taglen;
 	}
@@ -1535,7 +1543,6 @@ unsigned char *cipso_v4_optptr(const struct sk_buff *skb)
 
 /**
  * cipso_v4_validate - Validate a CIPSO option
- * @skb: the packet
  * @option: the start of the option, on error it is set to point to the error
  *
  * Description:
@@ -1725,31 +1732,13 @@ validate_return:
  */
 void cipso_v4_error(struct sk_buff *skb, int error, u32 gateway)
 {
-	unsigned char optbuf[sizeof(struct ip_options) + 40];
-	struct ip_options *opt = (struct ip_options *)optbuf;
-	int res;
-
 	if (ip_hdr(skb)->protocol == IPPROTO_ICMP || error != -EACCES)
 		return;
 
-	/*
-	 * We might be called above the IP layer,
-	 * so we can not use icmp_send and IPCB here.
-	 */
-
-	memset(opt, 0, sizeof(struct ip_options));
-	opt->optlen = ip_hdr(skb)->ihl*4 - sizeof(struct iphdr);
-	rcu_read_lock();
-	res = __ip_options_compile(dev_net(skb->dev), opt, skb, NULL);
-	rcu_read_unlock();
-
-	if (res)
-		return;
-
 	if (gateway)
-		__icmp_send(skb, ICMP_DEST_UNREACH, ICMP_NET_ANO, 0, opt);
+		icmp_send(skb, ICMP_DEST_UNREACH, ICMP_NET_ANO, 0);
 	else
-		__icmp_send(skb, ICMP_DEST_UNREACH, ICMP_HOST_ANO, 0, opt);
+		icmp_send(skb, ICMP_DEST_UNREACH, ICMP_HOST_ANO, 0);
 }
 
 /**
@@ -2067,7 +2056,7 @@ void cipso_v4_sock_delattr(struct sock *sk)
 
 /**
  * cipso_v4_req_delattr - Delete the CIPSO option from a request socket
- * @req: the request socket
+ * @reg: the request socket
  *
  * Description:
  * Removes the CIPSO option from a request socket, if present.
@@ -2159,7 +2148,6 @@ int cipso_v4_sock_getattr(struct sock *sk, struct netlbl_lsm_secattr *secattr)
 /**
  * cipso_v4_skbuff_setattr - Set the CIPSO option on a packet
  * @skb: the packet
- * @doi_def: the DOI structure
  * @secattr: the security attributes
  *
  * Description:

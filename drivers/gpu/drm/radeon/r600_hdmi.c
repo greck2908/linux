@@ -25,12 +25,11 @@
  */
 #include <linux/hdmi.h>
 #include <linux/gcd.h>
-
+#include <drm/drmP.h>
 #include <drm/radeon_drm.h>
 #include "radeon.h"
 #include "radeon_asic.h"
 #include "radeon_audio.h"
-#include "r600.h"
 #include "r600d.h"
 #include "atom.h"
 

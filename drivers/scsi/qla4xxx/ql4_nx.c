@@ -1,7 +1,8 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * QLogic iSCSI HBA Driver
  * Copyright (c)  2003-2013 QLogic Corporation
+ *
+ * See LICENSE.qla4xxx for copyright and licensing details.
  */
 #include <linux/delay.h>
 #include <linux/io.h>
@@ -44,8 +45,6 @@ qla4_8xxx_pci_base_offsetfset(struct scsi_qla_host *ha, unsigned long off)
 	return NULL;
 }
 
-static const int MD_MIU_TEST_AGT_RDDATA[] = { 0x410000A8,
-				0x410000AC, 0x410000B8, 0x410000BC };
 #define MAX_CRB_XFORM 60
 static unsigned long crb_addr_xform[MAX_CRB_XFORM];
 static int qla4_8xxx_crb_table_initialized;
@@ -375,35 +374,6 @@ qla4_82xx_pci_set_crbwindow_2M(struct scsi_qla_host *ha, ulong *off)
 	*off = (*off & MASK(16)) + CRB_INDIRECT_2M + ha->nx_pcibase;
 }
 
-#define CRB_WIN_LOCK_TIMEOUT 100000000
-
-/*
- * Context: atomic
- */
-static int qla4_82xx_crb_win_lock(struct scsi_qla_host *ha)
-{
-	int done = 0, timeout = 0;
-
-	while (!done) {
-		/* acquire semaphore3 from PCI HW block */
-		done = qla4_82xx_rd_32(ha, QLA82XX_PCIE_REG(PCIE_SEM7_LOCK));
-		if (done == 1)
-			break;
-		if (timeout >= CRB_WIN_LOCK_TIMEOUT)
-			return -1;
-
-		timeout++;
-		udelay(10);
-	}
-	qla4_82xx_wr_32(ha, QLA82XX_CRB_WIN_LOCK_ID, ha->func_num);
-	return 0;
-}
-
-void qla4_82xx_crb_win_unlock(struct scsi_qla_host *ha)
-{
-	qla4_82xx_rd_32(ha, QLA82XX_PCIE_REG(PCIE_SEM7_UNLOCK));
-}
-
 void
 qla4_82xx_wr_32(struct scsi_qla_host *ha, ulong off, u32 data)
 {
@@ -504,6 +474,40 @@ int qla4_82xx_md_wr_32(struct scsi_qla_host *ha, uint32_t off, uint32_t data)
 	return rval;
 }
 
+#define CRB_WIN_LOCK_TIMEOUT 100000000
+
+int qla4_82xx_crb_win_lock(struct scsi_qla_host *ha)
+{
+	int i;
+	int done = 0, timeout = 0;
+
+	while (!done) {
+		/* acquire semaphore3 from PCI HW block */
+		done = qla4_82xx_rd_32(ha, QLA82XX_PCIE_REG(PCIE_SEM7_LOCK));
+		if (done == 1)
+			break;
+		if (timeout >= CRB_WIN_LOCK_TIMEOUT)
+			return -1;
+
+		timeout++;
+
+		/* Yield CPU */
+		if (!in_interrupt())
+			schedule();
+		else {
+			for (i = 0; i < 20; i++)
+				cpu_relax();    /*This a nop instr on i386*/
+		}
+	}
+	qla4_82xx_wr_32(ha, QLA82XX_CRB_WIN_LOCK_ID, ha->func_num);
+	return 0;
+}
+
+void qla4_82xx_crb_win_unlock(struct scsi_qla_host *ha)
+{
+	qla4_82xx_rd_32(ha, QLA82XX_PCIE_REG(PCIE_SEM7_UNLOCK));
+}
+
 #define IDC_LOCK_TIMEOUT 100000000
 
 /**
@@ -512,14 +516,11 @@ int qla4_82xx_md_wr_32(struct scsi_qla_host *ha, uint32_t off, uint32_t data)
  *
  * General purpose lock used to synchronize access to
  * CRB_DEV_STATE, CRB_DEV_REF_COUNT, etc.
- *
- * Context: task, can sleep
  **/
 int qla4_82xx_idc_lock(struct scsi_qla_host *ha)
 {
+	int i;
 	int done = 0, timeout = 0;
-
-	might_sleep();
 
 	while (!done) {
 		/* acquire semaphore5 from PCI HW block */
@@ -530,7 +531,14 @@ int qla4_82xx_idc_lock(struct scsi_qla_host *ha)
 			return -1;
 
 		timeout++;
-		msleep(100);
+
+		/* Yield CPU */
+		if (!in_interrupt())
+			schedule();
+		else {
+			for (i = 0; i < 20; i++)
+				cpu_relax();    /*This a nop instr on i386*/
+		}
 	}
 	return 0;
 }
@@ -871,18 +879,15 @@ qla4_82xx_decode_crb_addr(unsigned long addr)
 static long rom_max_timeout = 100;
 static long qla4_82xx_rom_lock_timeout = 100;
 
-/*
- * Context: task, can_sleep
- */
 static int
 qla4_82xx_rom_lock(struct scsi_qla_host *ha)
 {
+	int i;
 	int done = 0, timeout = 0;
-
-	might_sleep();
 
 	while (!done) {
 		/* acquire semaphore2 from PCI HW block */
+
 		done = qla4_82xx_rd_32(ha, QLA82XX_PCIE_REG(PCIE_SEM2_LOCK));
 		if (done == 1)
 			break;
@@ -890,7 +895,14 @@ qla4_82xx_rom_lock(struct scsi_qla_host *ha)
 			return -1;
 
 		timeout++;
-		msleep(20);
+
+		/* Yield CPU */
+		if (!in_interrupt())
+			schedule();
+		else {
+			for (i = 0; i < 20; i++)
+				cpu_relax();    /*This a nop instr on i386*/
+		}
 	}
 	qla4_82xx_wr_32(ha, QLA82XX_ROM_LOCK_ID, ROM_LOCK_DRIVER);
 	return 0;
@@ -960,10 +972,10 @@ qla4_82xx_rom_fast_read(struct scsi_qla_host *ha, int addr, int *valp)
 	return ret;
 }
 
-/*
+/**
  * This routine does CRB initialize sequence
  * to put the ISP into operational state
- */
+ **/
 static int
 qla4_82xx_pinit_from_rom(struct scsi_qla_host *ha, int verbose)
 {
@@ -1063,7 +1075,7 @@ qla4_82xx_pinit_from_rom(struct scsi_qla_host *ha, int verbose)
 	ql4_printk(KERN_INFO, ha,
 		"%s: %d CRB init values found in ROM.\n", DRIVER_NAME, n);
 
-	buf = kmalloc_array(n, sizeof(struct crb_addr_pair), GFP_KERNEL);
+	buf = kmalloc(n * sizeof(struct crb_addr_pair), GFP_KERNEL);
 	if (buf == NULL) {
 		ql4_printk(KERN_WARNING, ha,
 		    "%s: [ERROR] Unable to malloc memory.\n", DRIVER_NAME);
@@ -1767,7 +1779,7 @@ qla4_82xx_start_firmware(struct scsi_qla_host *ha, uint32_t image_start)
 
 int qla4_82xx_try_start_fw(struct scsi_qla_host *ha)
 {
-	int rval;
+	int rval = QLA_ERROR;
 
 	/*
 	 * FW Load priority:
@@ -2631,7 +2643,7 @@ static uint32_t qla4_84xx_minidump_process_rddfe(struct scsi_qla_host *ha,
 	uint32_t addr1, addr2, value, data, temp, wrval;
 	uint8_t stride, stride2;
 	uint16_t count;
-	uint32_t poll, mask, modify_mask;
+	uint32_t poll, mask, data_size, modify_mask;
 	uint32_t wait_count = 0;
 	uint32_t *data_ptr = *d_ptr;
 	struct qla8044_minidump_entry_rddfe *rddfe;
@@ -2647,6 +2659,7 @@ static uint32_t qla4_84xx_minidump_process_rddfe(struct scsi_qla_host *ha,
 	poll = le32_to_cpu(rddfe->poll);
 	mask = le32_to_cpu(rddfe->mask);
 	modify_mask = le32_to_cpu(rddfe->modify_mask);
+	data_size = le32_to_cpu(rddfe->data_size);
 
 	addr2 = addr1 + stride;
 
@@ -2727,7 +2740,7 @@ static uint32_t qla4_84xx_minidump_process_rdmdio(struct scsi_qla_host *ha,
 	uint8_t stride1, stride2;
 	uint32_t addr3, addr4, addr5, addr6, addr7;
 	uint16_t count, loop_cnt;
-	uint32_t mask;
+	uint32_t poll, mask;
 	uint32_t *data_ptr = *d_ptr;
 	struct qla8044_minidump_entry_rdmdio *rdmdio;
 
@@ -2739,6 +2752,7 @@ static uint32_t qla4_84xx_minidump_process_rdmdio(struct scsi_qla_host *ha,
 	stride2 = le32_to_cpu(rdmdio->stride_2);
 	count = le32_to_cpu(rdmdio->count);
 
+	poll = le32_to_cpu(rdmdio->poll);
 	mask = le32_to_cpu(rdmdio->mask);
 	value2 = le32_to_cpu(rdmdio->value_2);
 
@@ -2797,7 +2811,7 @@ static uint32_t qla4_84xx_minidump_process_pollwr(struct scsi_qla_host *ha,
 				struct qla8xxx_minidump_entry_hdr *entry_hdr,
 				uint32_t **d_ptr)
 {
-	uint32_t addr1, addr2, value1, value2, poll, r_value;
+	uint32_t addr1, addr2, value1, value2, poll, mask, r_value;
 	struct qla8044_minidump_entry_pollwr *pollwr_hdr;
 	uint32_t wait_count = 0;
 	uint32_t rval = QLA_SUCCESS;
@@ -2809,6 +2823,7 @@ static uint32_t qla4_84xx_minidump_process_pollwr(struct scsi_qla_host *ha,
 	value2 = le32_to_cpu(pollwr_hdr->value_2);
 
 	poll = le32_to_cpu(pollwr_hdr->poll);
+	mask = le32_to_cpu(pollwr_hdr->mask);
 
 	while (wait_count < poll) {
 		ha->isp_ops->rd_reg_indirect(ha, addr1, &r_value);
@@ -3203,7 +3218,6 @@ md_failed:
 /**
  * qla4_8xxx_uevent_emit - Send uevent when the firmware dump is ready.
  * @ha: pointer to adapter structure
- * @code: uevent code to act upon
  **/
 static void qla4_8xxx_uevent_emit(struct scsi_qla_host *ha, u32 code)
 {
@@ -3212,7 +3226,7 @@ static void qla4_8xxx_uevent_emit(struct scsi_qla_host *ha, u32 code)
 
 	switch (code) {
 	case QL4_UEVENT_CODE_FW_DUMP:
-		snprintf(event_string, sizeof(event_string), "FW_DUMP=%lu",
+		snprintf(event_string, sizeof(event_string), "FW_DUMP=%ld",
 			 ha->host_no);
 		break;
 	default:
@@ -3672,9 +3686,9 @@ done_read:
 	return dwptr;
 }
 
-/*
+/**
  * Address and length are byte address
- */
+ **/
 static uint8_t *
 qla4_82xx_read_optrom_data(struct scsi_qla_host *ha, uint8_t *buf,
 		uint32_t offset, uint32_t length)
@@ -4044,6 +4058,7 @@ int qla4_8xxx_get_sys_info(struct scsi_qla_host *ha)
 		return status;
 	}
 
+	memset(sys_info, 0, sizeof(*sys_info));
 	memset(&mbox_cmd, 0, sizeof(mbox_cmd));
 	memset(&mbox_sts, 0, sizeof(mbox_sts));
 

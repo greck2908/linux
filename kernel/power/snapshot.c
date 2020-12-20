@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/kernel/power/snapshot.c
  *
@@ -6,9 +5,12 @@
  *
  * Copyright (C) 1998-2005 Pavel Machek <pavel@ucw.cz>
  * Copyright (C) 2006 Rafael J. Wysocki <rjw@sisk.pl>
+ *
+ * This file is released under the GPLv2.
+ *
  */
 
-#define pr_fmt(fmt) "PM: hibernation: " fmt
+#define pr_fmt(fmt) "PM: " fmt
 
 #include <linux/version.h>
 #include <linux/module.h>
@@ -21,7 +23,7 @@
 #include <linux/pm.h>
 #include <linux/device.h>
 #include <linux/init.h>
-#include <linux/memblock.h>
+#include <linux/bootmem.h>
 #include <linux/nmi.h>
 #include <linux/syscalls.h>
 #include <linux/console.h>
@@ -34,6 +36,7 @@
 
 #include <linux/uaccess.h>
 #include <asm/mmu_context.h>
+#include <asm/pgtable.h>
 #include <asm/tlbflush.h>
 #include <asm/io.h>
 
@@ -76,40 +79,6 @@ static inline void hibernate_restore_protect_page(void *page_address) {}
 static inline void hibernate_restore_unprotect_page(void *page_address) {}
 #endif /* CONFIG_STRICT_KERNEL_RWX  && CONFIG_ARCH_HAS_SET_MEMORY */
 
-
-/*
- * The calls to set_direct_map_*() should not fail because remapping a page
- * here means that we only update protection bits in an existing PTE.
- * It is still worth to have a warning here if something changes and this
- * will no longer be the case.
- */
-static inline void hibernate_map_page(struct page *page)
-{
-	if (IS_ENABLED(CONFIG_ARCH_HAS_SET_DIRECT_MAP)) {
-		int ret = set_direct_map_default_noflush(page);
-
-		if (ret)
-			pr_warn_once("Failed to remap page\n");
-	} else {
-		debug_pagealloc_map_pages(page, 1);
-	}
-}
-
-static inline void hibernate_unmap_page(struct page *page)
-{
-	if (IS_ENABLED(CONFIG_ARCH_HAS_SET_DIRECT_MAP)) {
-		unsigned long addr = (unsigned long)page_address(page);
-		int ret  = set_direct_map_invalid_noflush(page);
-
-		if (ret)
-			pr_warn_once("Failed to remap page\n");
-
-		flush_tlb_kernel_range(addr, addr + PAGE_SIZE);
-	} else {
-		debug_pagealloc_unmap_pages(page, 1);
-	}
-}
-
 static int swsusp_page_is_free(struct page *);
 static void swsusp_set_page_forbidden(struct page *);
 static void swsusp_unset_page_forbidden(struct page *);
@@ -136,7 +105,7 @@ unsigned long image_size;
 
 void __init hibernate_image_size_init(void)
 {
-	image_size = ((totalram_pages() * 2) / 5) * PAGE_SIZE;
+	image_size = ((totalram_pages * 2) / 5) * PAGE_SIZE;
 }
 
 /*
@@ -767,15 +736,8 @@ zone_found:
 	 * We have found the zone. Now walk the radix tree to find the leaf node
 	 * for our PFN.
 	 */
-
-	/*
-	 * If the zone we wish to scan is the current zone and the
-	 * pfn falls into the current node then we do not need to walk
-	 * the tree.
-	 */
 	node = bm->cur.node;
-	if (zone == bm->cur.zone &&
-	    ((pfn - zone->start_pfn) & ~BM_BLOCK_MASK) == bm->cur.node_pfn)
+	if (((pfn - zone->start_pfn) & ~BM_BLOCK_MASK) == bm->cur.node_pfn)
 		goto node_found;
 
 	node      = zone->rtree;
@@ -1001,11 +963,7 @@ void __init __register_nosave_region(unsigned long start_pfn,
 		BUG_ON(!region);
 	} else {
 		/* This allocation cannot fail */
-		region = memblock_alloc(sizeof(struct nosave_region),
-					SMP_CACHE_BYTES);
-		if (!region)
-			panic("%s: Failed to allocate %zu bytes\n", __func__,
-			      sizeof(struct nosave_region));
+		region = memblock_virt_alloc(sizeof(struct nosave_region), 0);
 	}
 	region->start_pfn = start_pfn;
 	region->end_pfn = end_pfn;
@@ -1178,34 +1136,26 @@ void free_basic_memory_bitmaps(void)
 	pr_debug("Basic memory bitmaps freed\n");
 }
 
-static void clear_or_poison_free_page(struct page *page)
+void clear_free_pages(void)
 {
-	if (page_poisoning_enabled_static())
-		__kernel_poison_pages(page, 1);
-	else if (want_init_on_free())
-		clear_highpage(page);
-}
-
-void clear_or_poison_free_pages(void)
-{
+#ifdef CONFIG_PAGE_POISONING_ZERO
 	struct memory_bitmap *bm = free_pages_map;
 	unsigned long pfn;
 
 	if (WARN_ON(!(free_pages_map)))
 		return;
 
-	if (page_poisoning_enabled() || want_init_on_free()) {
-		memory_bm_position_reset(bm);
-		pfn = memory_bm_next_pfn(bm);
-		while (pfn != BM_END_OF_MAP) {
-			if (pfn_valid(pfn))
-				clear_or_poison_free_page(pfn_to_page(pfn));
+	memory_bm_position_reset(bm);
+	pfn = memory_bm_next_pfn(bm);
+	while (pfn != BM_END_OF_MAP) {
+		if (pfn_valid(pfn))
+			clear_highpage(pfn_to_page(pfn));
 
-			pfn = memory_bm_next_pfn(bm);
-		}
-		memory_bm_position_reset(bm);
-		pr_info("free pages cleared after restore\n");
+		pfn = memory_bm_next_pfn(bm);
 	}
+	memory_bm_position_reset(bm);
+	pr_info("free pages cleared after restore\n");
+#endif /* PAGE_POISONING_ZERO */
 }
 
 /**
@@ -1264,16 +1214,14 @@ static struct page *saveable_highmem_page(struct zone *zone, unsigned long pfn)
 	if (!pfn_valid(pfn))
 		return NULL;
 
-	page = pfn_to_online_page(pfn);
-	if (!page || page_zone(page) != zone)
+	page = pfn_to_page(pfn);
+	if (page_zone(page) != zone)
 		return NULL;
 
 	BUG_ON(!PageHighMem(page));
 
-	if (swsusp_page_is_forbidden(page) ||  swsusp_page_is_free(page))
-		return NULL;
-
-	if (PageReserved(page) || PageOffline(page))
+	if (swsusp_page_is_forbidden(page) ||  swsusp_page_is_free(page) ||
+	    PageReserved(page))
 		return NULL;
 
 	if (page_is_guard(page))
@@ -1328,16 +1276,13 @@ static struct page *saveable_page(struct zone *zone, unsigned long pfn)
 	if (!pfn_valid(pfn))
 		return NULL;
 
-	page = pfn_to_online_page(pfn);
-	if (!page || page_zone(page) != zone)
+	page = pfn_to_page(pfn);
+	if (page_zone(page) != zone)
 		return NULL;
 
 	BUG_ON(PageHighMem(page));
 
 	if (swsusp_page_is_forbidden(page) || swsusp_page_is_free(page))
-		return NULL;
-
-	if (PageOffline(page))
 		return NULL;
 
 	if (PageReserved(page)
@@ -1388,18 +1333,17 @@ static inline void do_copy_page(long *dst, long *src)
  * safe_copy_page - Copy a page in a safe way.
  *
  * Check if the page we are going to copy is marked as present in the kernel
- * page tables. This always is the case if CONFIG_DEBUG_PAGEALLOC or
- * CONFIG_ARCH_HAS_SET_DIRECT_MAP is not set. In that case kernel_page_present()
- * always returns 'true'.
+ * page tables (this always is the case if CONFIG_DEBUG_PAGEALLOC is not set
+ * and in that case kernel_page_present() always returns 'true').
  */
 static void safe_copy_page(void *dst, struct page *s_page)
 {
 	if (kernel_page_present(s_page)) {
 		do_copy_page(dst, page_address(s_page));
 	} else {
-		hibernate_map_page(s_page);
+		kernel_map_pages(s_page, 1, 1);
 		do_copy_page(dst, page_address(s_page));
-		hibernate_unmap_page(s_page);
+		kernel_map_pages(s_page, 1, 0);
 	}
 }
 
@@ -1607,7 +1551,9 @@ static unsigned long preallocate_image_highmem(unsigned long nr_pages)
  */
 static unsigned long __fraction(u64 x, u64 multiplier, u64 base)
 {
-	return div64_u64(x * multiplier, base);
+	x *= multiplier;
+	do_div(x, base);
+	return (unsigned long)x;
 }
 
 static unsigned long preallocate_highmem_fraction(unsigned long nr_pages,
@@ -1699,17 +1645,19 @@ static unsigned long free_unnecessary_pages(void)
  * [number of saveable pages] - [number of pages that can be freed in theory]
  *
  * where the second term is the sum of (1) reclaimable slab pages, (2) active
- * and (3) inactive anonymous pages, (4) active and (5) inactive file pages.
+ * and (3) inactive anonymous pages, (4) active and (5) inactive file pages,
+ * minus mapped file pages.
  */
 static unsigned long minimum_image_size(unsigned long saveable)
 {
 	unsigned long size;
 
-	size = global_node_page_state_pages(NR_SLAB_RECLAIMABLE_B)
+	size = global_node_page_state(NR_SLAB_RECLAIMABLE)
 		+ global_node_page_state(NR_ACTIVE_ANON)
 		+ global_node_page_state(NR_INACTIVE_ANON)
 		+ global_node_page_state(NR_ACTIVE_FILE)
-		+ global_node_page_state(NR_INACTIVE_FILE);
+		+ global_node_page_state(NR_INACTIVE_FILE)
+		- global_node_page_state(NR_FILE_MAPPED);
 
 	return saveable <= size ? 0 : saveable - size;
 }
@@ -1722,7 +1670,7 @@ static unsigned long minimum_image_size(unsigned long saveable)
  * hibernation for allocations made while saving the image and for device
  * drivers, in case they need to allocate memory from their hibernation
  * callbacks (these two numbers are given by PAGES_FOR_IO (which is a rough
- * estimate) and reserved_size divided by PAGE_SIZE (which is tunable through
+ * estimate) and reserverd_size divided by PAGE_SIZE (which is tunable through
  * /sys/power/reserved_size, respectively).  To make this happen, we compute the
  * total number of available page frames and allocate at least
  *
@@ -1744,20 +1692,16 @@ int hibernate_preallocate_memory(void)
 	ktime_t start, stop;
 	int error;
 
-	pr_info("Preallocating image memory\n");
+	pr_info("Preallocating image memory... ");
 	start = ktime_get();
 
 	error = memory_bm_create(&orig_bm, GFP_IMAGE, PG_ANY);
-	if (error) {
-		pr_err("Cannot allocate original bitmap\n");
+	if (error)
 		goto err_out;
-	}
 
 	error = memory_bm_create(&copy_bm, GFP_IMAGE, PG_ANY);
-	if (error) {
-		pr_err("Cannot allocate copy bitmap\n");
+	if (error)
 		goto err_out;
-	}
 
 	alloc_normal = 0;
 	alloc_highmem = 0;
@@ -1784,6 +1728,9 @@ int hibernate_preallocate_memory(void)
 	avail_normal = count;
 	count += highmem;
 	count -= totalreserve_pages;
+
+	/* Add number of pages required for page keys (s390 only). */
+	size += page_key_additional_pages(saveable);
 
 	/* Compute the maximum number of saveable pages to leave in memory. */
 	max_size = (count - (size + PAGES_FOR_IO)) / 2
@@ -1844,11 +1791,8 @@ int hibernate_preallocate_memory(void)
 		alloc -= pages;
 		pages += pages_highmem;
 		pages_highmem = preallocate_image_highmem(alloc);
-		if (pages_highmem < alloc) {
-			pr_err("Image allocation is %lu pages short\n",
-				alloc - pages_highmem);
+		if (pages_highmem < alloc)
 			goto err_out;
-		}
 		pages += pages_highmem;
 		/*
 		 * size is the desired number of saveable pages to leave in
@@ -1879,12 +1823,13 @@ int hibernate_preallocate_memory(void)
 
  out:
 	stop = ktime_get();
-	pr_info("Allocated %lu pages for snapshot\n", pages);
+	pr_cont("done (allocated %lu pages)\n", pages);
 	swsusp_show_speed(start, stop, pages, "Allocated");
 
 	return 0;
 
  err_out:
+	pr_cont("\n");
 	swsusp_free();
 	return -ENOMEM;
 }
@@ -2018,7 +1963,7 @@ asmlinkage __visible int swsusp_save(void)
 {
 	unsigned int nr_pages, nr_highmem;
 
-	pr_info("Creating image:\n");
+	pr_info("Creating hibernation image:\n");
 
 	drain_local_pages(NULL);
 	nr_pages = count_data_pages();
@@ -2052,7 +1997,7 @@ asmlinkage __visible int swsusp_save(void)
 	nr_copy_pages = nr_pages;
 	nr_meta_pages = DIV_ROUND_UP(nr_pages * sizeof(long), PAGE_SIZE);
 
-	pr_info("Image created (%d pages copied)\n", nr_pages);
+	pr_info("Hibernation image created (%d pages copied)\n", nr_pages);
 
 	return 0;
 }
@@ -2065,7 +2010,7 @@ static int init_header_complete(struct swsusp_info *info)
 	return 0;
 }
 
-static const char *check_image_kernel(struct swsusp_info *info)
+static char *check_image_kernel(struct swsusp_info *info)
 {
 	if (info->version_code != LINUX_VERSION_CODE)
 		return "kernel version";
@@ -2113,6 +2058,8 @@ static inline void pack_pfns(unsigned long *buf, struct memory_bitmap *bm)
 		buf[j] = memory_bm_next_pfn(bm);
 		if (unlikely(buf[j] == BM_END_OF_MAP))
 			break;
+		/* Save page key for data page (s390 only). */
+		page_key_read(buf + j);
 	}
 }
 
@@ -2218,7 +2165,7 @@ static void mark_unsafe_pages(struct memory_bitmap *bm)
 
 static int check_header(struct swsusp_info *info)
 {
-	const char *reason;
+	char *reason;
 
 	reason = check_image_kernel(info);
 	if (!reason && info->num_physpages != get_num_physpages())
@@ -2261,6 +2208,9 @@ static int unpack_orig_pfns(unsigned long *buf, struct memory_bitmap *bm)
 	for (j = 0; j < PAGE_SIZE / sizeof(long); j++) {
 		if (unlikely(buf[j] == BM_END_OF_MAP))
 			break;
+
+		/* Extract and buffer page key for data page (s390 only). */
+		page_key_memorize(buf + j);
 
 		if (pfn_valid(buf[j]) && memory_bm_pfn_present(bm, buf[j]))
 			memory_bm_set_bit(bm, buf[j]);
@@ -2656,6 +2606,11 @@ int snapshot_write_next(struct snapshot_handle *handle)
 		if (error)
 			return error;
 
+		/* Allocate buffer for page keys. */
+		error = page_key_alloc(nr_copy_pages);
+		if (error)
+			return error;
+
 		hibernate_restore_protection_begin();
 	} else if (handle->cur <= nr_meta_pages + 1) {
 		error = unpack_orig_pfns(buffer, &copy_bm);
@@ -2677,6 +2632,8 @@ int snapshot_write_next(struct snapshot_handle *handle)
 		}
 	} else {
 		copy_last_highmem_page();
+		/* Restore page key for data page (s390 only). */
+		page_key_write(handle->buffer);
 		hibernate_restore_protect_page(handle->buffer);
 		handle->buffer = get_buffer(&orig_bm, &ca);
 		if (IS_ERR(handle->buffer))
@@ -2699,6 +2656,9 @@ int snapshot_write_next(struct snapshot_handle *handle)
 void snapshot_write_finalize(struct snapshot_handle *handle)
 {
 	copy_last_highmem_page();
+	/* Restore page key for data page (s390 only). */
+	page_key_write(handle->buffer);
+	page_key_free();
 	hibernate_restore_protect_page(handle->buffer);
 	/* Do that only if we have loaded the image entirely */
 	if (handle->cur > 1 && handle->cur > nr_meta_pages + nr_copy_pages) {

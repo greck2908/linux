@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * comedi_8255.c
  * Generic 8255 digital I/O support
@@ -7,6 +6,16 @@
  *
  * COMEDI - Linux Control and Measurement Device Interface
  * Copyright (C) 1998 David A. Schleef <ds@schleef.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  */
 
 /*
@@ -248,7 +257,7 @@ EXPORT_SYMBOL_GPL(subdev_8255_mm_init);
  * subdev_8255_regbase - get offset of 8255 registers or call-back context
  * @s: comedi subdevice
  *
- * Returns the 'regbase' parameter that was previously passed to
+ * Returns the 'regbase' parameter that was previously passed to to
  * subdev_8255_init() or subdev_8255_mm_init() to set up the subdevice.
  * Only valid if the subdevice was set up successfully.
  */
@@ -271,6 +280,6 @@ static void __exit comedi_8255_module_exit(void)
 }
 module_exit(comedi_8255_module_exit);
 
-MODULE_AUTHOR("Comedi https://www.comedi.org");
+MODULE_AUTHOR("Comedi http://www.comedi.org");
 MODULE_DESCRIPTION("Comedi: Generic 8255 digital I/O support");
 MODULE_LICENSE("GPL");

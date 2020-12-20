@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: (GPL-2.0 OR MPL-1.1)
 /* src/p80211/p80211knetdev.c
  *
  * Linux Kernel net device interface
@@ -95,13 +94,13 @@
 static int p80211knetdev_init(struct net_device *netdev);
 static int p80211knetdev_open(struct net_device *netdev);
 static int p80211knetdev_stop(struct net_device *netdev);
-static netdev_tx_t p80211knetdev_hard_start_xmit(struct sk_buff *skb,
-						 struct net_device *netdev);
+static int p80211knetdev_hard_start_xmit(struct sk_buff *skb,
+					 struct net_device *netdev);
 static void p80211knetdev_set_multicast_list(struct net_device *dev);
 static int p80211knetdev_do_ioctl(struct net_device *dev, struct ifreq *ifr,
 				  int cmd);
 static int p80211knetdev_set_mac_address(struct net_device *dev, void *addr);
-static void p80211knetdev_tx_timeout(struct net_device *netdev, unsigned int txqueue);
+static void p80211knetdev_tx_timeout(struct net_device *netdev);
 static int p80211_rx_typedrop(struct wlandevice *wlandev, u16 fc);
 
 int wlan_watchdog = 5000;
@@ -266,15 +265,15 @@ static int p80211_convert_to_ether(struct wlandevice *wlandev,
 /**
  * p80211netdev_rx_bh - deferred processing of all received frames
  *
- * @t: pointer to the tasklet associated with this handler
+ * @arg: pointer to WLAN network device structure (cast to unsigned long)
  */
-static void p80211netdev_rx_bh(struct tasklet_struct *t)
+static void p80211netdev_rx_bh(unsigned long arg)
 {
-	struct wlandevice *wlandev = from_tasklet(wlandev, t, rx_bh);
+	struct wlandevice *wlandev = (struct wlandevice *)arg;
 	struct sk_buff *skb = NULL;
 	struct net_device *dev = wlandev->netdev;
 
-	/* Let's empty our queue */
+	/* Let's empty our our queue */
 	while ((skb = skb_dequeue(&wlandev->nsd_rxq))) {
 		if (wlandev->state == WLAN_DEVICE_OPEN) {
 			if (dev->type != ARPHRD_ETHER) {
@@ -321,8 +320,8 @@ static void p80211netdev_rx_bh(struct tasklet_struct *t)
  *	zero on success, non-zero on failure.
  *----------------------------------------------------------------
  */
-static netdev_tx_t p80211knetdev_hard_start_xmit(struct sk_buff *skb,
-						 struct net_device *netdev)
+static int p80211knetdev_hard_start_xmit(struct sk_buff *skb,
+					 struct net_device *netdev)
 {
 	int result = 0;
 	int txresult = -1;
@@ -429,7 +428,7 @@ static netdev_tx_t p80211knetdev_hard_start_xmit(struct sk_buff *skb,
 failed:
 	/* Free up the WEP buffer if it's not the same as the skb */
 	if ((p80211_wep.data) && (p80211_wep.data != skb->data))
-		kfree_sensitive(p80211_wep.data);
+		kzfree(p80211_wep.data);
 
 	/* we always free the skb here, never in a lower level. */
 	if (!result)
@@ -638,25 +637,24 @@ static int p80211knetdev_set_mac_address(struct net_device *dev, void *addr)
 
 	/* Set up a dot11req_mibset */
 	memset(&dot11req, 0, sizeof(dot11req));
-	dot11req.msgcode = DIDMSG_DOT11REQ_MIBSET;
+	dot11req.msgcode = DIDmsg_dot11req_mibset;
 	dot11req.msglen = sizeof(dot11req);
 	memcpy(dot11req.devname,
-	       ((struct wlandevice *)dev->ml_priv)->name,
-	       WLAN_DEVNAMELEN_MAX - 1);
+	       ((struct wlandevice *)dev->ml_priv)->name, WLAN_DEVNAMELEN_MAX - 1);
 
 	/* Set up the mibattribute argument */
-	mibattr->did = DIDMSG_DOT11REQ_MIBSET_MIBATTRIBUTE;
+	mibattr->did = DIDmsg_dot11req_mibset_mibattribute;
 	mibattr->status = P80211ENUM_msgitem_status_data_ok;
 	mibattr->len = sizeof(mibattr->data);
 
-	macaddr->did = DIDMIB_DOT11MAC_OPERATIONTABLE_MACADDRESS;
+	macaddr->did = DIDmib_dot11mac_dot11OperationTable_dot11MACAddress;
 	macaddr->status = P80211ENUM_msgitem_status_data_ok;
 	macaddr->len = sizeof(macaddr->data);
 	macaddr->data.len = ETH_ALEN;
 	memcpy(&macaddr->data.data, new_addr->sa_data, ETH_ALEN);
 
 	/* Set up the resultcode argument */
-	resultcode->did = DIDMSG_DOT11REQ_MIBSET_RESULTCODE;
+	resultcode->did = DIDmsg_dot11req_mibset_resultcode;
 	resultcode->status = P80211ENUM_msgitem_status_no_value;
 	resultcode->len = sizeof(resultcode->data);
 	resultcode->data = 0;
@@ -728,7 +726,8 @@ int wlan_setup(struct wlandevice *wlandev, struct device *physdev)
 
 	/* Set up the rx queue */
 	skb_queue_head_init(&wlandev->nsd_rxq);
-	tasklet_setup(&wlandev->rx_bh, p80211netdev_rx_bh);
+	tasklet_init(&wlandev->rx_bh,
+		     p80211netdev_rx_bh, (unsigned long)wlandev);
 
 	/* Allocate and initialize the wiphy struct */
 	wiphy = wlan_create_wiphy(physdev, wlandev);
@@ -926,6 +925,10 @@ static int p80211_rx_typedrop(struct wlandevice *wlandev, u16 fc)
 	/* Classify frame, increment counter */
 	ftype = WLAN_GET_FC_FTYPE(fc);
 	fstype = WLAN_GET_FC_FSTYPE(fc);
+#if 0
+	netdev_dbg(wlandev->netdev, "rx_typedrop : ftype=%d fstype=%d.\n",
+		   ftype, fstype);
+#endif
 	switch (ftype) {
 	case WLAN_FTYPE_MGMT:
 		if ((wlandev->netdev->flags & IFF_PROMISC) ||
@@ -1073,7 +1076,7 @@ static int p80211_rx_typedrop(struct wlandevice *wlandev, u16 fc)
 	return drop;
 }
 
-static void p80211knetdev_tx_timeout(struct net_device *netdev, unsigned int txqueue)
+static void p80211knetdev_tx_timeout(struct net_device *netdev)
 {
 	struct wlandevice *wlandev = netdev->ml_priv;
 

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * 'traps.c' handles hardware traps and faults after we have saved some
  * state in 'entry.S'.
@@ -7,6 +6,10 @@
  *                  Copyright (C) 2000 Philipp Rumpf
  *                  Copyright (C) 2000 David Howells
  *                  Copyright (C) 2002 - 2010 Paul Mundt
+ *
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
  */
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
@@ -474,6 +477,7 @@ asmlinkage void do_address_error(struct pt_regs *regs,
 {
 	unsigned long error_code = 0;
 	mm_segment_t oldfs;
+	siginfo_t info;
 	insn_size_t instruction;
 	int tmp;
 
@@ -482,6 +486,8 @@ asmlinkage void do_address_error(struct pt_regs *regs,
 	error_code = lookup_exception_vector();
 #endif
 
+	oldfs = get_fs();
+
 	if (user_mode(regs)) {
 		int si_code = BUS_ADRERR;
 		unsigned int user_action;
@@ -489,13 +495,13 @@ asmlinkage void do_address_error(struct pt_regs *regs,
 		local_irq_enable();
 		inc_unaligned_user_access();
 
-		oldfs = force_uaccess_begin();
+		set_fs(USER_DS);
 		if (copy_from_user(&instruction, (insn_size_t *)(regs->pc & ~1),
 				   sizeof(instruction))) {
-			force_uaccess_end(oldfs);
+			set_fs(oldfs);
 			goto uspace_segv;
 		}
-		force_uaccess_end(oldfs);
+		set_fs(oldfs);
 
 		/* shout about userspace fixups */
 		unaligned_fixups_notify(current, instruction, regs);
@@ -518,11 +524,11 @@ fixup:
 			goto uspace_segv;
 		}
 
-		oldfs = force_uaccess_begin();
+		set_fs(USER_DS);
 		tmp = handle_unaligned_access(instruction, regs,
 					      &user_mem_access, 0,
 					      address);
-		force_uaccess_end(oldfs);
+		set_fs(oldfs);
 
 		if (tmp == 0)
 			return; /* sorted */
@@ -531,7 +537,11 @@ uspace_segv:
 		       "access (PC %lx PR %lx)\n", current->comm, regs->pc,
 		       regs->pr);
 
-		force_sig_fault(SIGBUS, si_code, (void __user *)address);
+		info.si_signo = SIGBUS;
+		info.si_errno = 0;
+		info.si_code = si_code;
+		info.si_addr = (void __user *)address;
+		force_sig_info(SIGBUS, &info, current);
 	} else {
 		inc_unaligned_kernel_access();
 
@@ -588,20 +598,18 @@ int is_dsp_inst(struct pt_regs *regs)
 #ifdef CONFIG_CPU_SH2A
 asmlinkage void do_divide_error(unsigned long r4)
 {
-	int code;
+	siginfo_t info;
 
 	switch (r4) {
 	case TRAP_DIVZERO_ERROR:
-		code = FPE_INTDIV;
+		info.si_code = FPE_INTDIV;
 		break;
 	case TRAP_DIVOVF_ERROR:
-		code = FPE_INTOVF;
+		info.si_code = FPE_INTOVF;
 		break;
-	default:
-		/* Let gcc know unhandled cases don't make it past here */
-		return;
 	}
-	force_sig_fault(SIGFPE, code, NULL);
+
+	force_sig_info(SIGFPE, &info, current);
 }
 #endif
 
@@ -609,6 +617,7 @@ asmlinkage void do_reserved_inst(void)
 {
 	struct pt_regs *regs = current_pt_regs();
 	unsigned long error_code;
+	struct task_struct *tsk = current;
 
 #ifdef CONFIG_SH_FPU_EMU
 	unsigned short inst = 0;
@@ -630,7 +639,7 @@ asmlinkage void do_reserved_inst(void)
 		/* Enable DSP mode, and restart instruction. */
 		regs->sr |= SR_DSP;
 		/* Save DSP mode */
-		current->thread.dsp_status.status |= SR_DSP;
+		tsk->thread.dsp_status.status |= SR_DSP;
 		return;
 	}
 #endif
@@ -638,7 +647,7 @@ asmlinkage void do_reserved_inst(void)
 	error_code = lookup_exception_vector();
 
 	local_irq_enable();
-	force_sig(SIGILL);
+	force_sig(SIGILL, tsk);
 	die_if_no_fixup("reserved instruction", regs, error_code);
 }
 
@@ -694,6 +703,7 @@ asmlinkage void do_illegal_slot_inst(void)
 {
 	struct pt_regs *regs = current_pt_regs();
 	unsigned long inst;
+	struct task_struct *tsk = current;
 
 	if (kprobe_handle_illslot(regs->pc) == 0)
 		return;
@@ -712,7 +722,7 @@ asmlinkage void do_illegal_slot_inst(void)
 	inst = lookup_exception_vector();
 
 	local_irq_enable();
-	force_sig(SIGILL);
+	force_sig(SIGILL, tsk);
 	die_if_no_fixup("illegal slot instruction", regs, inst);
 }
 

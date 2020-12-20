@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
+ * linux/kernel/irq/spurious.c
+ *
  * Copyright (C) 1992, 1998-2004 Linus Torvalds, Ingo Molnar
  *
  * This file contains spurious interrupt handling.
@@ -8,6 +10,7 @@
 #include <linux/jiffies.h>
 #include <linux/irq.h>
 #include <linux/module.h>
+#include <linux/kallsyms.h>
 #include <linux/interrupt.h>
 #include <linux/moduleparam.h>
 #include <linux/timer.h>
@@ -34,7 +37,6 @@ static atomic_t irq_poll_active;
  * true and let the handler run.
  */
 bool irq_wait_for_poll(struct irq_desc *desc)
-	__must_hold(&desc->lock)
 {
 	if (WARN_ONCE(irq_poll_cpu == smp_processor_id(),
 		      "irq poll in progress on cpu %d for irq %d\n",
@@ -67,7 +69,7 @@ static int try_one_irq(struct irq_desc *desc, bool force)
 	raw_spin_lock(&desc->lock);
 
 	/*
-	 * PER_CPU, nested thread interrupts and interrupts explicitly
+	 * PER_CPU, nested thread interrupts and interrupts explicitely
 	 * marked polled are excluded from polling.
 	 */
 	if (irq_settings_is_per_cpu(desc) ||
@@ -77,7 +79,7 @@ static int try_one_irq(struct irq_desc *desc, bool force)
 
 	/*
 	 * Do not poll disabled interrupts unless the spurious
-	 * disabled poller asks explicitly.
+	 * disabled poller asks explicitely.
 	 */
 	if (irqd_irq_disabled(&desc->irq_data) && !force)
 		goto out;
@@ -213,9 +215,9 @@ static void __report_bad_irq(struct irq_desc *desc, irqreturn_t action_ret)
 	 */
 	raw_spin_lock_irqsave(&desc->lock, flags);
 	for_each_action_of_desc(desc, action) {
-		printk(KERN_ERR "[<%p>] %ps", action->handler, action->handler);
+		printk(KERN_ERR "[<%p>] %pf", action->handler, action->handler);
 		if (action->thread_fn)
-			printk(KERN_CONT " threaded [<%p>] %ps",
+			printk(KERN_CONT " threaded [<%p>] %pf",
 					action->thread_fn, action->thread_fn);
 		printk(KERN_CONT "\n");
 	}
@@ -293,7 +295,7 @@ void note_interrupt(struct irq_desc *desc, irqreturn_t action_ret)
 	 * So in case a thread is woken, we just note the fact and
 	 * defer the analysis to the next hardware interrupt.
 	 *
-	 * The threaded handlers store whether they successfully
+	 * The threaded handlers store whether they sucessfully
 	 * handled an interrupt and we check whether that number
 	 * changed versus the last invocation.
 	 *

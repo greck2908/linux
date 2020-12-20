@@ -454,12 +454,6 @@ static int is_leaf(char *buf, int blocksize, struct buffer_head *bh)
 					 "(second one): %h", ih);
 			return 0;
 		}
-		if (is_direntry_le_ih(ih) && (ih_item_len(ih) < (ih_entry_count(ih) * IH_SIZE))) {
-			reiserfs_warning(NULL, "reiserfs-5093",
-					 "item entry count seems wrong %h",
-					 ih);
-			return 0;
-		}
 		prev_location = ih_location(ih);
 	}
 
@@ -599,6 +593,7 @@ int search_by_key(struct super_block *sb, const struct cpu_key *key,
 	struct buffer_head *bh;
 	struct path_element *last_element;
 	int node_level, retval;
+	int right_neighbor_of_leaf_node;
 	int fs_gen;
 	struct buffer_head *reada_bh[SEARCH_BY_KEY_READA];
 	b_blocknr_t reada_blocks[SEARCH_BY_KEY_READA];
@@ -618,6 +613,8 @@ int search_by_key(struct super_block *sb, const struct cpu_key *key,
 	 */
 
 	pathrelse(search_path);
+
+	right_neighbor_of_leaf_node = 0;
 
 	/*
 	 * With each iteration of this loop we search through the items in the
@@ -704,6 +701,7 @@ io_error:
 			 */
 			block_number = SB_ROOT_BLOCK(sb);
 			expected_level = -1;
+			right_neighbor_of_leaf_node = 0;
 
 			/* repeat search from the root */
 			continue;
@@ -923,6 +921,12 @@ int comp_items(const struct item_head *stored_ih, const struct treepath *path)
 	ih = tp_item_head(path);
 	return memcmp(stored_ih, ih, IH_SIZE);
 }
+
+/* unformatted nodes are not logged anymore, ever.  This is safe now */
+#define held_by_others(bh) (atomic_read(&(bh)->b_count) > 1)
+
+/* block can not be forgotten as it is in I/O or held by someone */
+#define block_in_use(bh) (buffer_locked(bh) || (held_by_others(bh)))
 
 /* prepare for delete or cut of direct item */
 static inline int prepare_for_direct_item(struct treepath *path,
@@ -2246,8 +2250,7 @@ error_out:
 	/* also releases the path */
 	unfix_nodes(&s_ins_balance);
 #ifdef REISERQUOTA_DEBUG
-	if (inode)
-		reiserfs_debug(th->t_super, REISERFS_DEBUG_CODE,
+	reiserfs_debug(th->t_super, REISERFS_DEBUG_CODE,
 		       "reiserquota insert_item(): freeing %u id=%u type=%c",
 		       quota_bytes, inode->i_uid, head2type(ih));
 #endif

@@ -131,7 +131,6 @@ static int state_dbg_show(struct seq_file *s, void *p)
 
 	return 0;
 }
-DEFINE_SHOW_ATTRIBUTE(state_dbg);
 
 static int queues_dbg_show(struct seq_file *s, void *p)
 {
@@ -164,7 +163,6 @@ static int queues_dbg_show(struct seq_file *s, void *p)
 
 	return 0;
 }
-DEFINE_SHOW_ATTRIBUTE(queues_dbg);
 
 static int eps_dbg_show(struct seq_file *s, void *p)
 {
@@ -201,23 +199,92 @@ static int eps_dbg_show(struct seq_file *s, void *p)
 
 	return 0;
 }
-DEFINE_SHOW_ATTRIBUTE(eps_dbg);
+
+static int eps_dbg_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, eps_dbg_show, inode->i_private);
+}
+
+static int queues_dbg_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, queues_dbg_show, inode->i_private);
+}
+
+static int state_dbg_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, state_dbg_show, inode->i_private);
+}
+
+static const struct file_operations state_dbg_fops = {
+	.owner		= THIS_MODULE,
+	.open		= state_dbg_open,
+	.llseek		= seq_lseek,
+	.read		= seq_read,
+	.release	= single_release,
+};
+
+static const struct file_operations queues_dbg_fops = {
+	.owner		= THIS_MODULE,
+	.open		= queues_dbg_open,
+	.llseek		= seq_lseek,
+	.read		= seq_read,
+	.release	= single_release,
+};
+
+static const struct file_operations eps_dbg_fops = {
+	.owner		= THIS_MODULE,
+	.open		= eps_dbg_open,
+	.llseek		= seq_lseek,
+	.read		= seq_read,
+	.release	= single_release,
+};
 
 static void pxa_init_debugfs(struct pxa_udc *udc)
 {
-	struct dentry *root;
+	struct dentry *root, *state, *queues, *eps;
 
-	root = debugfs_create_dir(udc->gadget.name, usb_debug_root);
+	root = debugfs_create_dir(udc->gadget.name, NULL);
+	if (IS_ERR(root) || !root)
+		goto err_root;
+
+	state = debugfs_create_file("udcstate", 0400, root, udc,
+			&state_dbg_fops);
+	if (!state)
+		goto err_state;
+	queues = debugfs_create_file("queues", 0400, root, udc,
+			&queues_dbg_fops);
+	if (!queues)
+		goto err_queues;
+	eps = debugfs_create_file("epstate", 0400, root, udc,
+			&eps_dbg_fops);
+	if (!eps)
+		goto err_eps;
+
 	udc->debugfs_root = root;
-
-	debugfs_create_file("udcstate", 0400, root, udc, &state_dbg_fops);
-	debugfs_create_file("queues", 0400, root, udc, &queues_dbg_fops);
-	debugfs_create_file("epstate", 0400, root, udc, &eps_dbg_fops);
+	udc->debugfs_state = state;
+	udc->debugfs_queues = queues;
+	udc->debugfs_eps = eps;
+	return;
+err_eps:
+	debugfs_remove(eps);
+err_queues:
+	debugfs_remove(queues);
+err_state:
+	debugfs_remove(root);
+err_root:
+	dev_err(udc->dev, "debugfs is not available\n");
 }
 
 static void pxa_cleanup_debugfs(struct pxa_udc *udc)
 {
-	debugfs_remove_recursive(udc->debugfs_root);
+	debugfs_remove(udc->debugfs_eps);
+	debugfs_remove(udc->debugfs_queues);
+	debugfs_remove(udc->debugfs_state);
+	debugfs_remove(udc->debugfs_root);
+	udc->debugfs_eps = NULL;
+	udc->debugfs_queues = NULL;
+	udc->debugfs_state = NULL;
+	udc->debugfs_root = NULL;
 }
 
 #else
@@ -304,7 +371,7 @@ static struct pxa_ep *find_pxa_ep(struct pxa_udc *udc,
  * update_pxa_ep_matches - update pxa_ep cached values in all udc_usb_ep
  * @udc: pxa udc
  *
- * Context: interrupt handler
+ * Context: in_interrupt()
  *
  * Updates all pxa_ep fields in udc_usb_ep structures, if this field was
  * previously set up (and is not NULL). The update is necessary is a
@@ -386,7 +453,7 @@ static inline void udc_clear_mask_UDCCR(struct pxa_udc *udc, int mask)
 
 /**
  * ep_write_UDCCSR - set bits in UDCCSR
- * @ep: udc endpoint
+ * @udc: udc device
  * @mask: bits to set in UDCCR
  *
  * Sets bits in UDCCSR (UDCCSR0 and UDCCSR*).
@@ -472,7 +539,7 @@ static int epout_has_pkt(struct pxa_ep *ep)
 
 /**
  * set_ep0state - Set ep0 automata state
- * @udc: udc device
+ * @dev: udc device
  * @state: state
  */
 static void set_ep0state(struct pxa_udc *udc, int state)
@@ -498,6 +565,7 @@ static void ep0_idle(struct pxa_udc *dev)
 /**
  * inc_ep_stats_reqs - Update ep stats counts
  * @ep: physical endpoint
+ * @req: usb request
  * @is_in: ep direction (USB_DIR_IN or 0)
  *
  */
@@ -859,7 +927,7 @@ static int write_packet(struct pxa_ep *ep, struct pxa27x_request *req,
  * @ep: pxa physical endpoint
  * @req: usb request
  *
- * Context: interrupt handler
+ * Context: callable when in_interrupt()
  *
  * Unload as many packets as possible from the fifo we use for usb OUT
  * transfers and put them into the request. Caller should have made sure
@@ -911,6 +979,8 @@ static int write_fifo(struct pxa_ep *ep, struct pxa27x_request *req)
 
 	max = ep->fifo_size;
 	do {
+		is_short = 0;
+
 		udccsr = udc_ep_readl(ep, UDCCSR);
 		if (udccsr & UDCCSR_PC) {
 			ep_vdbg(ep, "Clearing Transmit Complete, udccsr=%x\n",
@@ -997,7 +1067,7 @@ static int read_ep0_fifo(struct pxa_ep *ep, struct pxa27x_request *req)
  * @ep: control endpoint
  * @req: request
  *
- * Context: interrupt handler
+ * Context: callable when in_interrupt()
  *
  * Sends a request (or a part of the request) to the control endpoint (ep0 in).
  * If the request doesn't fit, the remaining part will be sent from irq.
@@ -1036,8 +1106,8 @@ static int write_ep0_fifo(struct pxa_ep *ep, struct pxa27x_request *req)
  * @_req: usb request
  * @gfp_flags: flags
  *
- * Context: thread context or from the interrupt handler in the
- * special case of ep0 setup :
+ * Context: normally called when !in_interrupt, but callable when in_interrupt()
+ * in the special case of ep0 setup :
  *   (irq->handle_ep0_ctrl_req->gadget_setup->pxa_ep_queue)
  *
  * Returns 0 if succedeed, error otherwise
@@ -1064,6 +1134,7 @@ static int pxa_ep_queue(struct usb_ep *_ep, struct usb_request *_req,
 	if (unlikely(!_ep))
 		return -EINVAL;
 
+	dev = udc_usb_ep->dev;
 	ep = udc_usb_ep->pxa_ep;
 	if (unlikely(!ep))
 		return -EINVAL;
@@ -1472,6 +1543,7 @@ static void udc_disable(struct pxa_udc *udc);
  * Context: any
  *
  * The UDC should be enabled if :
+
  *  - the pullup resistor is connected
  *  - and a gadget driver is bound
  *  - and vbus is sensed (or no vbus sense is available)
@@ -1512,8 +1584,7 @@ static int should_disable_udc(struct pxa_udc *udc)
  * pxa_udc_pullup - Offer manual D+ pullup control
  * @_gadget: usb gadget using the control
  * @is_active: 0 if disconnect, else connect D+ pullup resistor
- *
- * Context: task context, might sleep
+ * Context: !in_interrupt()
  *
  * Returns 0 if OK, -EOPNOTSUPP if udc driver doesn't handle D+ pullup
  */
@@ -1561,7 +1632,7 @@ static int pxa_udc_vbus_session(struct usb_gadget *_gadget, int is_active)
  * @_gadget: usb gadget
  * @mA: current drawn
  *
- * Context: task context, might sleep
+ * Context: !in_interrupt()
  *
  * Called after a configuration was chosen by a USB host, to inform how much
  * current can be drawn by the device from VBus line.
@@ -1687,7 +1758,7 @@ static void udc_init_data(struct pxa_udc *dev)
 
 /**
  * udc_enable - Enables the udc device
- * @udc: udc device
+ * @dev: udc device
  *
  * Enables the udc device : enables clocks, udc interrupts, control endpoint
  * interrupts, sets usb as UDC client and setups endpoints.
@@ -1731,8 +1802,8 @@ static void udc_enable(struct pxa_udc *udc)
 
 /**
  * pxa27x_start - Register gadget driver
- * @g: gadget
  * @driver: gadget driver
+ * @bind: bind function
  *
  * When a driver is successfully registered, it will receive control requests
  * including set_configuration(), which enables non-control requests.  Then
@@ -1774,6 +1845,7 @@ fail:
 /**
  * stop_activity - Stops udc endpoints
  * @udc: udc device
+ * @driver: gadget driver
  *
  * Disables all udc endpoints (even control endpoint), report disconnect to
  * the gadget user.
@@ -1790,7 +1862,7 @@ static void stop_activity(struct pxa_udc *udc)
 
 /**
  * pxa27x_udc_stop - Unregister the gadget driver
- * @g: gadget
+ * @driver: gadget driver
  *
  * Returns 0 if no error, -ENODEV, -EINVAL otherwise
  */
@@ -1887,7 +1959,7 @@ stall:
  * @fifo_irq: 1 if triggered by fifo service type irq
  * @opc_irq: 1 if triggered by output packet complete type irq
  *
- * Context : interrupt handler
+ * Context : when in_interrupt() or with ep->lock held
  *
  * Tries to transfer all pending request data into the endpoint and/or
  * transfer all pending data in the endpoint into usb requests.
@@ -2012,7 +2084,7 @@ static void handle_ep0(struct pxa_udc *udc, int fifo_irq, int opc_irq)
  * Tries to transfer all pending request data into the endpoint and/or
  * transfer all pending data in the endpoint into usb requests.
  *
- * Is always called from the interrupt handler. ep->lock must not be held.
+ * Is always called when in_interrupt() and with ep->lock released.
  */
 static void handle_ep(struct pxa_ep *ep)
 {
@@ -2347,13 +2419,14 @@ MODULE_DEVICE_TABLE(of, udc_pxa_dt_ids);
 
 /**
  * pxa_udc_probe - probes the udc device
- * @pdev: platform device
+ * @_dev: platform device
  *
  * Perform basic init : allocates udc clock, creates sysfs files, requests
  * irq.
  */
 static int pxa_udc_probe(struct platform_device *pdev)
 {
+	struct resource *regs;
 	struct pxa_udc *udc = &memory;
 	int retval = 0, gpio;
 	struct pxa2xx_udc_mach_info *mach = dev_get_platdata(&pdev->dev);
@@ -2375,7 +2448,8 @@ static int pxa_udc_probe(struct platform_device *pdev)
 		udc->gpiod = devm_gpiod_get(&pdev->dev, NULL, GPIOD_ASIS);
 	}
 
-	udc->regs = devm_platform_ioremap_resource(pdev, 0);
+	regs = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	udc->regs = devm_ioremap_resource(&pdev->dev, regs);
 	if (IS_ERR(udc->regs))
 		return PTR_ERR(udc->regs);
 	udc->irq = platform_get_irq(pdev, 0);

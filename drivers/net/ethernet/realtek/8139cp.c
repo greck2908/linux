@@ -571,17 +571,12 @@ static irqreturn_t cp_interrupt (int irq, void *dev_instance)
 	struct cp_private *cp;
 	int handled = 0;
 	u16 status;
-	u16 mask;
 
 	if (unlikely(dev == NULL))
 		return IRQ_NONE;
 	cp = netdev_priv(dev);
 
 	spin_lock(&cp->lock);
-
-	mask = cpr16(IntrMask);
-	if (!mask)
-		goto out_unlock;
 
 	status = cpr16(IntrStatus);
 	if (!status || (status == 0xFFFF))
@@ -691,7 +686,7 @@ static void cp_tx (struct cp_private *cp)
 			}
 			bytes_compl += skb->len;
 			pkts_compl++;
-			dev_consume_skb_irq(skb);
+			dev_kfree_skb_irq(skb);
 		}
 
 		cp->tx_skb[tx_tail] = NULL;
@@ -753,8 +748,8 @@ static netdev_tx_t cp_start_xmit (struct sk_buff *skb,
 	mss = skb_shinfo(skb)->gso_size;
 
 	if (mss > MSSMask) {
-		netdev_WARN_ONCE(dev, "Net bug: GSO size %d too large for 8139CP\n",
-				 mss);
+		WARN_ONCE(1, "Net bug: GSO size %d too large for 8139CP\n",
+			  mss);
 		goto out_dma_error;
 	}
 
@@ -1235,11 +1230,11 @@ static int cp_close (struct net_device *dev)
 	return 0;
 }
 
-static void cp_tx_timeout(struct net_device *dev, unsigned int txqueue)
+static void cp_tx_timeout(struct net_device *dev)
 {
 	struct cp_private *cp = netdev_priv(dev);
 	unsigned long flags;
-	int i;
+	int rc, i;
 
 	netdev_warn(dev, "Transmit timeout, status %2x %4x %4x %4x\n",
 		    cpr8(Cmd), cpr16(CpCmd),
@@ -1260,7 +1255,7 @@ static void cp_tx_timeout(struct net_device *dev, unsigned int txqueue)
 
 	cp_stop_hw(cp);
 	cp_clean_rings(cp);
-	cp_init_rings(cp);
+	rc = cp_init_rings(cp);
 	cp_start_hw(cp);
 	__cp_set_rx_mode(dev);
 	cpw16_f(IntrMask, cp_norx_intr_mask);
@@ -2054,9 +2049,10 @@ static void cp_remove_one (struct pci_dev *pdev)
 	free_netdev(dev);
 }
 
-static int __maybe_unused cp_suspend(struct device *device)
+#ifdef CONFIG_PM
+static int cp_suspend (struct pci_dev *pdev, pm_message_t state)
 {
-	struct net_device *dev = dev_get_drvdata(device);
+	struct net_device *dev = pci_get_drvdata(pdev);
 	struct cp_private *cp = netdev_priv(dev);
 	unsigned long flags;
 
@@ -2074,14 +2070,16 @@ static int __maybe_unused cp_suspend(struct device *device)
 
 	spin_unlock_irqrestore (&cp->lock, flags);
 
-	device_set_wakeup_enable(device, cp->wol_enabled);
+	pci_save_state(pdev);
+	pci_enable_wake(pdev, pci_choose_state(pdev, state), cp->wol_enabled);
+	pci_set_power_state(pdev, pci_choose_state(pdev, state));
 
 	return 0;
 }
 
-static int __maybe_unused cp_resume(struct device *device)
+static int cp_resume (struct pci_dev *pdev)
 {
-	struct net_device *dev = dev_get_drvdata(device);
+	struct net_device *dev = pci_get_drvdata (pdev);
 	struct cp_private *cp = netdev_priv(dev);
 	unsigned long flags;
 
@@ -2089,6 +2087,10 @@ static int __maybe_unused cp_resume(struct device *device)
 		return 0;
 
 	netif_device_attach (dev);
+
+	pci_set_power_state(pdev, PCI_D0);
+	pci_restore_state(pdev);
+	pci_enable_wake(pdev, PCI_D0, 0);
 
 	/* FIXME: sh*t may happen if the Rx ring buffer is depleted */
 	cp_init_rings_index (cp);
@@ -2104,6 +2106,7 @@ static int __maybe_unused cp_resume(struct device *device)
 
 	return 0;
 }
+#endif /* CONFIG_PM */
 
 static const struct pci_device_id cp_pci_tbl[] = {
         { PCI_DEVICE(PCI_VENDOR_ID_REALTEK,     PCI_DEVICE_ID_REALTEK_8139), },
@@ -2112,14 +2115,15 @@ static const struct pci_device_id cp_pci_tbl[] = {
 };
 MODULE_DEVICE_TABLE(pci, cp_pci_tbl);
 
-static SIMPLE_DEV_PM_OPS(cp_pm_ops, cp_suspend, cp_resume);
-
 static struct pci_driver cp_driver = {
 	.name         = DRV_NAME,
 	.id_table     = cp_pci_tbl,
 	.probe        =	cp_init_one,
 	.remove       = cp_remove_one,
-	.driver.pm    = &cp_pm_ops,
+#ifdef CONFIG_PM
+	.resume       = cp_resume,
+	.suspend      = cp_suspend,
+#endif
 };
 
 module_pci_driver(cp_driver);

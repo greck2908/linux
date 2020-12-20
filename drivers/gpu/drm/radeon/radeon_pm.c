@@ -20,20 +20,14 @@
  * Authors: Rafał Miłecki <zajec5@gmail.com>
  *          Alex Deucher <alexdeucher@gmail.com>
  */
-
-#include <linux/hwmon-sysfs.h>
-#include <linux/hwmon.h>
-#include <linux/pci.h>
-#include <linux/power_supply.h>
-
-#include <drm/drm_debugfs.h>
-#include <drm/drm_vblank.h>
-
-#include "atom.h"
-#include "avivod.h"
-#include "r600_dpm.h"
+#include <drm/drmP.h>
 #include "radeon.h"
-#include "radeon_pm.h"
+#include "avivod.h"
+#include "atom.h"
+#include "r600_dpm.h"
+#include <linux/power_supply.h>
+#include <linux/hwmon.h>
+#include <linux/hwmon-sysfs.h>
 
 #define RADEON_IDLE_LOOP_MS 100
 #define RADEON_RECLOCK_DELAY_MS 200
@@ -53,6 +47,7 @@ static bool radeon_pm_in_vbl(struct radeon_device *rdev);
 static bool radeon_pm_debug_check_in_vbl(struct radeon_device *rdev, bool finish);
 static void radeon_pm_update_profile(struct radeon_device *rdev);
 static void radeon_pm_set_clocks(struct radeon_device *rdev);
+static void radeon_pm_compute_clocks_dpm(struct radeon_device *rdev);
 
 int radeon_pm_get_type_index(struct radeon_device *rdev,
 			     enum radeon_pm_state_type ps_type,
@@ -85,6 +80,8 @@ void radeon_pm_acpi_event_handler(struct radeon_device *rdev)
 				radeon_dpm_enable_bapm(rdev, rdev->pm.dpm.ac_power);
 		}
 		mutex_unlock(&rdev->pm.mutex);
+		/* allow new DPM state to be picked */
+		radeon_pm_compute_clocks_dpm(rdev);
 	} else if (rdev->pm.pm_method == PM_METHOD_PROFILE) {
 		if (rdev->pm.profile == PM_PROFILE_AUTO) {
 			mutex_lock(&rdev->pm.mutex);
@@ -713,51 +710,6 @@ static SENSOR_DEVICE_ATTR(pwm1_enable, S_IRUGO | S_IWUSR, radeon_hwmon_get_pwm1_
 static SENSOR_DEVICE_ATTR(pwm1_min, S_IRUGO, radeon_hwmon_get_pwm1_min, NULL, 0);
 static SENSOR_DEVICE_ATTR(pwm1_max, S_IRUGO, radeon_hwmon_get_pwm1_max, NULL, 0);
 
-static ssize_t radeon_hwmon_show_sclk(struct device *dev,
-				      struct device_attribute *attr, char *buf)
-{
-	struct radeon_device *rdev = dev_get_drvdata(dev);
-	struct drm_device *ddev = rdev->ddev;
-	u32 sclk = 0;
-
-	/* Can't get clock frequency when the card is off */
-	if ((rdev->flags & RADEON_IS_PX) &&
-	    (ddev->switch_power_state != DRM_SWITCH_POWER_ON))
-		return -EINVAL;
-
-	if (rdev->asic->dpm.get_current_sclk)
-		sclk = radeon_dpm_get_current_sclk(rdev);
-
-	/* Value returned by dpm is in 10 KHz units, need to convert it into Hz 
-	   for hwmon */
-	sclk *= 10000;
-
-	return snprintf(buf, PAGE_SIZE, "%u\n", sclk);
-}
-
-static SENSOR_DEVICE_ATTR(freq1_input, S_IRUGO, radeon_hwmon_show_sclk, NULL,
-			  0);
-
-static ssize_t radeon_hwmon_show_vddc(struct device *dev,
-				      struct device_attribute *attr, char *buf)
-{
-	struct radeon_device *rdev = dev_get_drvdata(dev);
-	struct drm_device *ddev = rdev->ddev;
-	u16 vddc = 0;
-
-	/* Can't get vddc when the card is off */
-	if ((rdev->flags & RADEON_IS_PX) &&
-		(ddev->switch_power_state != DRM_SWITCH_POWER_ON))
-		return -EINVAL;
-
-	if (rdev->asic->dpm.get_current_vddc)
-		vddc = rdev->asic->dpm.get_current_vddc(rdev);
-
-	return snprintf(buf, PAGE_SIZE, "%u\n", vddc);
-}
-
-static SENSOR_DEVICE_ATTR(in0_input, S_IRUGO, radeon_hwmon_show_vddc, NULL,
-			  0);
 
 static struct attribute *hwmon_attributes[] = {
 	&sensor_dev_attr_temp1_input.dev_attr.attr,
@@ -767,8 +719,6 @@ static struct attribute *hwmon_attributes[] = {
 	&sensor_dev_attr_pwm1_enable.dev_attr.attr,
 	&sensor_dev_attr_pwm1_min.dev_attr.attr,
 	&sensor_dev_attr_pwm1_max.dev_attr.attr,
-	&sensor_dev_attr_freq1_input.dev_attr.attr,
-	&sensor_dev_attr_in0_input.dev_attr.attr,
 	NULL
 };
 
@@ -786,14 +736,7 @@ static umode_t hwmon_attributes_visible(struct kobject *kobj,
 	     attr == &sensor_dev_attr_pwm1.dev_attr.attr ||
 	     attr == &sensor_dev_attr_pwm1_enable.dev_attr.attr ||
 	     attr == &sensor_dev_attr_pwm1_max.dev_attr.attr ||
-	     attr == &sensor_dev_attr_pwm1_min.dev_attr.attr ||
-	     attr == &sensor_dev_attr_freq1_input.dev_attr.attr ||
-	     attr == &sensor_dev_attr_in0_input.dev_attr.attr))
-		return 0;
-
-	/* Skip vddc attribute if get_current_vddc is not implemented */
-	if(attr == &sensor_dev_attr_in0_input.dev_attr.attr &&
-		!rdev->asic->dpm.get_current_vddc)
+	     attr == &sensor_dev_attr_pwm1_min.dev_attr.attr))
 		return 0;
 
 	/* Skip fan attributes if fan is not present */
@@ -942,7 +885,8 @@ static struct radeon_ps *radeon_dpm_pick_power_state(struct radeon_device *rdev,
 		dpm_state = POWER_STATE_TYPE_INTERNAL_3DPERF;
 	/* balanced states don't exist at the moment */
 	if (dpm_state == POWER_STATE_TYPE_BALANCED)
-		dpm_state = POWER_STATE_TYPE_PERFORMANCE;
+		dpm_state = rdev->pm.dpm.ac_power ?
+			POWER_STATE_TYPE_PERFORMANCE : POWER_STATE_TYPE_BATTERY;
 
 restart_search:
 	/* Pick the best power state based on current conditions */
@@ -1844,7 +1788,7 @@ static bool radeon_pm_debug_check_in_vbl(struct radeon_device *rdev, bool finish
 	u32 stat_crtc = 0;
 	bool in_vbl = radeon_pm_in_vbl(rdev);
 
-	if (!in_vbl)
+	if (in_vbl == false)
 		DRM_DEBUG_DRIVER("not in vbl for pm change %08x at %s\n", stat_crtc,
 			 finish ? "exit" : "entry");
 	return in_vbl;

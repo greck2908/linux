@@ -19,6 +19,7 @@
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
+#include <linux/workqueue.h>
 #include <linux/uaccess.h>
 #include <linux/usb.h>
 #include <linux/wait.h>
@@ -197,13 +198,14 @@ struct digi_port {
 	int dp_throttle_restart;
 	wait_queue_head_t dp_flush_wait;
 	wait_queue_head_t dp_close_wait;	/* wait queue for close */
-	wait_queue_head_t write_wait;
+	struct work_struct dp_wakeup_work;
 	struct usb_serial_port *dp_port;
 };
 
 
 /* Local Function Declarations */
 
+static void digi_wakeup_write_lock(struct work_struct *work);
 static int digi_write_oob_command(struct usb_serial_port *port,
 	unsigned char *buf, int count, int interruptible);
 static int digi_write_inb_command(struct usb_serial_port *port,
@@ -354,6 +356,26 @@ __releases(lock)
 	return timeout;
 }
 
+
+/*
+ *  Digi Wakeup Write
+ *
+ *  Wake up port, line discipline, and tty processes sleeping
+ *  on writes.
+ */
+
+static void digi_wakeup_write_lock(struct work_struct *work)
+{
+	struct digi_port *priv =
+			container_of(work, struct digi_port, dp_wakeup_work);
+	struct usb_serial_port *port = priv->dp_port;
+	unsigned long flags;
+
+	spin_lock_irqsave(&priv->dp_port_lock, flags);
+	tty_port_tty_wakeup(&port->port);
+	spin_unlock_irqrestore(&priv->dp_port_lock, flags);
+}
+
 /*
  *  Digi Write OOB Command
  *
@@ -382,7 +404,7 @@ static int digi_write_oob_command(struct usb_serial_port *port,
 	while (count > 0) {
 		while (oob_priv->dp_write_urb_in_use) {
 			cond_wait_interruptible_timeout_irqrestore(
-				&oob_priv->write_wait, DIGI_RETRY_TIMEOUT,
+				&oob_port->write_wait, DIGI_RETRY_TIMEOUT,
 				&oob_priv->dp_port_lock, flags);
 			if (interruptible && signal_pending(current))
 				return -EINTR;
@@ -445,7 +467,7 @@ static int digi_write_inb_command(struct usb_serial_port *port,
 		while (priv->dp_write_urb_in_use &&
 		       time_before(jiffies, timeout)) {
 			cond_wait_interruptible_timeout_irqrestore(
-				&priv->write_wait, DIGI_RETRY_TIMEOUT,
+				&port->write_wait, DIGI_RETRY_TIMEOUT,
 				&priv->dp_port_lock, flags);
 			if (signal_pending(current))
 				return -EINTR;
@@ -524,7 +546,7 @@ static int digi_set_modem_signals(struct usb_serial_port *port,
 	while (oob_priv->dp_write_urb_in_use) {
 		spin_unlock(&port_priv->dp_port_lock);
 		cond_wait_interruptible_timeout_irqrestore(
-			&oob_priv->write_wait, DIGI_RETRY_TIMEOUT,
+			&oob_port->write_wait, DIGI_RETRY_TIMEOUT,
 			&oob_priv->dp_port_lock, flags);
 		if (interruptible && signal_pending(current))
 			return -EINTR;
@@ -547,9 +569,9 @@ static int digi_set_modem_signals(struct usb_serial_port *port,
 	ret = usb_submit_urb(oob_port->write_urb, GFP_ATOMIC);
 	if (ret == 0) {
 		oob_priv->dp_write_urb_in_use = 1;
-		port_priv->dp_modem_signals &= ~(TIOCM_DTR | TIOCM_RTS);
-		port_priv->dp_modem_signals |=
-				modem_signals & (TIOCM_DTR | TIOCM_RTS);
+		port_priv->dp_modem_signals =
+			(port_priv->dp_modem_signals&~(TIOCM_DTR|TIOCM_RTS))
+			| (modem_signals&(TIOCM_DTR|TIOCM_RTS));
 	}
 	spin_unlock(&port_priv->dp_port_lock);
 	spin_unlock_irqrestore(&oob_priv->dp_port_lock, flags);
@@ -718,9 +740,9 @@ static void digi_set_termios(struct tty_struct *tty,
 	/* set parity */
 	tty->termios.c_cflag &= ~CMSPAR;
 
-	if ((cflag & (PARENB | PARODD)) != (old_cflag & (PARENB | PARODD))) {
-		if (cflag & PARENB) {
-			if (cflag & PARODD)
+	if ((cflag&(PARENB|PARODD)) != (old_cflag&(PARENB|PARODD))) {
+		if (cflag&PARENB) {
+			if (cflag&PARODD)
 				arg = DIGI_PARITY_ODD;
 			else
 				arg = DIGI_PARITY_EVEN;
@@ -733,9 +755,9 @@ static void digi_set_termios(struct tty_struct *tty,
 		buf[i++] = 0;
 	}
 	/* set word size */
-	if ((cflag & CSIZE) != (old_cflag & CSIZE)) {
+	if ((cflag&CSIZE) != (old_cflag&CSIZE)) {
 		arg = -1;
-		switch (cflag & CSIZE) {
+		switch (cflag&CSIZE) {
 		case CS5: arg = DIGI_WORD_SIZE_5; break;
 		case CS6: arg = DIGI_WORD_SIZE_6; break;
 		case CS7: arg = DIGI_WORD_SIZE_7; break;
@@ -743,7 +765,7 @@ static void digi_set_termios(struct tty_struct *tty,
 		default:
 			dev_dbg(dev,
 				"digi_set_termios: can't handle word size %d\n",
-				cflag & CSIZE);
+				(cflag&CSIZE));
 			break;
 		}
 
@@ -757,9 +779,9 @@ static void digi_set_termios(struct tty_struct *tty,
 	}
 
 	/* set stop bits */
-	if ((cflag & CSTOPB) != (old_cflag & CSTOPB)) {
+	if ((cflag&CSTOPB) != (old_cflag&CSTOPB)) {
 
-		if ((cflag & CSTOPB))
+		if ((cflag&CSTOPB))
 			arg = DIGI_STOP_BITS_2;
 		else
 			arg = DIGI_STOP_BITS_1;
@@ -772,15 +794,15 @@ static void digi_set_termios(struct tty_struct *tty,
 	}
 
 	/* set input flow control */
-	if ((iflag & IXOFF) != (old_iflag & IXOFF) ||
-			(cflag & CRTSCTS) != (old_cflag & CRTSCTS)) {
+	if ((iflag&IXOFF) != (old_iflag&IXOFF)
+	    || (cflag&CRTSCTS) != (old_cflag&CRTSCTS)) {
 		arg = 0;
-		if (iflag & IXOFF)
+		if (iflag&IXOFF)
 			arg |= DIGI_INPUT_FLOW_CONTROL_XON_XOFF;
 		else
 			arg &= ~DIGI_INPUT_FLOW_CONTROL_XON_XOFF;
 
-		if (cflag & CRTSCTS) {
+		if (cflag&CRTSCTS) {
 			arg |= DIGI_INPUT_FLOW_CONTROL_RTS;
 
 			/* On USB-4 it is necessary to assert RTS prior */
@@ -800,18 +822,19 @@ static void digi_set_termios(struct tty_struct *tty,
 	}
 
 	/* set output flow control */
-	if ((iflag & IXON) != (old_iflag & IXON) ||
-			(cflag & CRTSCTS) != (old_cflag & CRTSCTS)) {
+	if ((iflag & IXON) != (old_iflag & IXON)
+	    || (cflag & CRTSCTS) != (old_cflag & CRTSCTS)) {
 		arg = 0;
 		if (iflag & IXON)
 			arg |= DIGI_OUTPUT_FLOW_CONTROL_XON_XOFF;
 		else
 			arg &= ~DIGI_OUTPUT_FLOW_CONTROL_XON_XOFF;
 
-		if (cflag & CRTSCTS)
+		if (cflag & CRTSCTS) {
 			arg |= DIGI_OUTPUT_FLOW_CONTROL_CTS;
-		else
+		} else {
 			arg &= ~DIGI_OUTPUT_FLOW_CONTROL_CTS;
+		}
 
 		buf[i++] = DIGI_CMD_SET_OUTPUT_FLOW_CONTROL;
 		buf[i++] = priv->dp_port_num;
@@ -889,8 +912,9 @@ static int digi_write(struct tty_struct *tty, struct usb_serial_port *port,
 	unsigned char *data = port->write_urb->transfer_buffer;
 	unsigned long flags = 0;
 
-	dev_dbg(&port->dev, "digi_write: TOP: port=%d, count=%d\n",
-		priv->dp_port_num, count);
+	dev_dbg(&port->dev,
+		"digi_write: TOP: port=%d, count=%d, in_interrupt=%ld\n",
+		priv->dp_port_num, count, in_interrupt());
 
 	/* copy user data (which can sleep) before getting spin lock */
 	count = min(count, port->bulk_out_size-2);
@@ -960,10 +984,8 @@ static void digi_write_bulk_callback(struct urb *urb)
 	struct usb_serial *serial;
 	struct digi_port *priv;
 	struct digi_serial *serial_priv;
-	unsigned long flags;
 	int ret = 0;
 	int status = urb->status;
-	bool wakeup;
 
 	/* port and serial sanity check */
 	if (port == NULL || (priv = usb_get_serial_port_data(port)) == NULL) {
@@ -982,16 +1004,15 @@ static void digi_write_bulk_callback(struct urb *urb)
 	/* handle oob callback */
 	if (priv->dp_port_num == serial_priv->ds_oob_port_num) {
 		dev_dbg(&port->dev, "digi_write_bulk_callback: oob callback\n");
-		spin_lock_irqsave(&priv->dp_port_lock, flags);
+		spin_lock(&priv->dp_port_lock);
 		priv->dp_write_urb_in_use = 0;
-		wake_up_interruptible(&priv->write_wait);
-		spin_unlock_irqrestore(&priv->dp_port_lock, flags);
+		wake_up_interruptible(&port->write_wait);
+		spin_unlock(&priv->dp_port_lock);
 		return;
 	}
 
 	/* try to send any buffered data on this port */
-	wakeup = true;
-	spin_lock_irqsave(&priv->dp_port_lock, flags);
+	spin_lock(&priv->dp_port_lock);
 	priv->dp_write_urb_in_use = 0;
 	if (priv->dp_out_buf_len > 0) {
 		*((unsigned char *)(port->write_urb->transfer_buffer))
@@ -1006,18 +1027,19 @@ static void digi_write_bulk_callback(struct urb *urb)
 		if (ret == 0) {
 			priv->dp_write_urb_in_use = 1;
 			priv->dp_out_buf_len = 0;
-			wakeup = false;
 		}
 	}
-	spin_unlock_irqrestore(&priv->dp_port_lock, flags);
+	/* wake up processes sleeping on writes immediately */
+	tty_port_tty_wakeup(&port->port);
+	/* also queue up a wakeup at scheduler time, in case we */
+	/* lost the race in write_chan(). */
+	schedule_work(&priv->dp_wakeup_work);
 
+	spin_unlock(&priv->dp_port_lock);
 	if (ret && ret != -EPERM)
 		dev_err_console(port,
 			"%s: usb_submit_urb failed, ret=%d, port=%d\n",
 			__func__, ret, priv->dp_port_num);
-
-	if (wakeup)
-		tty_port_tty_wakeup(&port->port);
 }
 
 static int digi_write_room(struct tty_struct *tty)
@@ -1061,7 +1083,7 @@ static int digi_chars_in_buffer(struct tty_struct *tty)
 static void digi_dtr_rts(struct usb_serial_port *port, int on)
 {
 	/* Adjust DTR and RTS */
-	digi_set_modem_signals(port, on * (TIOCM_DTR | TIOCM_RTS), 1);
+	digi_set_modem_signals(port, on * (TIOCM_DTR|TIOCM_RTS), 1);
 }
 
 static int digi_open(struct tty_struct *tty, struct usb_serial_port *port)
@@ -1217,8 +1239,10 @@ static int digi_port_init(struct usb_serial_port *port, unsigned port_num)
 	init_waitqueue_head(&priv->dp_transmit_idle_wait);
 	init_waitqueue_head(&priv->dp_flush_wait);
 	init_waitqueue_head(&priv->dp_close_wait);
-	init_waitqueue_head(&priv->write_wait);
+	INIT_WORK(&priv->dp_wakeup_work, digi_wakeup_write_lock);
 	priv->dp_port = port;
+
+	init_waitqueue_head(&port->write_wait);
 
 	usb_set_serial_port_data(port, priv);
 
@@ -1357,12 +1381,11 @@ static int digi_read_inb_callback(struct urb *urb)
 	struct usb_serial_port *port = urb->context;
 	struct digi_port *priv = usb_get_serial_port_data(port);
 	unsigned char *buf = urb->transfer_buffer;
-	unsigned long flags;
 	int opcode;
 	int len;
 	int port_status;
 	unsigned char *data;
-	int tty_flag, throttled;
+	int flag, throttled;
 
 	/* short/multiple packet check */
 	if (urb->actual_length < 2) {
@@ -1384,7 +1407,7 @@ static int digi_read_inb_callback(struct urb *urb)
 		return -1;
 	}
 
-	spin_lock_irqsave(&priv->dp_port_lock, flags);
+	spin_lock(&priv->dp_port_lock);
 
 	/* check for throttle; if set, do not resubmit read urb */
 	/* indicate the read chain needs to be restarted on unthrottle */
@@ -1398,7 +1421,7 @@ static int digi_read_inb_callback(struct urb *urb)
 		data = &buf[3];
 
 		/* get flag from port_status */
-		tty_flag = 0;
+		flag = 0;
 
 		/* overrun is special, not associated with a char */
 		if (port_status & DIGI_OVERRUN_ERROR)
@@ -1407,21 +1430,21 @@ static int digi_read_inb_callback(struct urb *urb)
 		/* break takes precedence over parity, */
 		/* which takes precedence over framing errors */
 		if (port_status & DIGI_BREAK_ERROR)
-			tty_flag = TTY_BREAK;
+			flag = TTY_BREAK;
 		else if (port_status & DIGI_PARITY_ERROR)
-			tty_flag = TTY_PARITY;
+			flag = TTY_PARITY;
 		else if (port_status & DIGI_FRAMING_ERROR)
-			tty_flag = TTY_FRAME;
+			flag = TTY_FRAME;
 
 		/* data length is len-1 (one byte of len is port_status) */
 		--len;
 		if (len > 0) {
 			tty_insert_flip_string_fixed_flag(&port->port, data,
-					tty_flag, len);
+					flag, len);
 			tty_flip_buffer_push(&port->port);
 		}
 	}
-	spin_unlock_irqrestore(&priv->dp_port_lock, flags);
+	spin_unlock(&priv->dp_port_lock);
 
 	if (opcode == DIGI_CMD_RECEIVE_DISABLE)
 		dev_dbg(&port->dev, "%s: got RECEIVE_DISABLE\n", __func__);
@@ -1448,10 +1471,9 @@ static int digi_read_oob_callback(struct urb *urb)
 	struct usb_serial_port *port = urb->context;
 	struct usb_serial *serial = port->serial;
 	struct tty_struct *tty;
-	struct digi_port *priv;
+	struct digi_port *priv = usb_get_serial_port_data(port);
 	unsigned char *buf = urb->transfer_buffer;
 	int opcode, line, status, val;
-	unsigned long flags;
 	int i;
 	unsigned int rts;
 
@@ -1484,14 +1506,13 @@ static int digi_read_oob_callback(struct urb *urb)
 			rts = C_CRTSCTS(tty);
 
 		if (tty && opcode == DIGI_CMD_READ_INPUT_SIGNALS) {
-			bool wakeup = false;
-
-			spin_lock_irqsave(&priv->dp_port_lock, flags);
+			spin_lock(&priv->dp_port_lock);
 			/* convert from digi flags to termiox flags */
 			if (val & DIGI_READ_INPUT_SIGNALS_CTS) {
 				priv->dp_modem_signals |= TIOCM_CTS;
+				/* port must be open to use tty struct */
 				if (rts)
-					wakeup = true;
+					tty_port_tty_wakeup(&port->port);
 			} else {
 				priv->dp_modem_signals &= ~TIOCM_CTS;
 				/* port must be open to use tty struct */
@@ -1509,15 +1530,12 @@ static int digi_read_oob_callback(struct urb *urb)
 			else
 				priv->dp_modem_signals &= ~TIOCM_CD;
 
-			spin_unlock_irqrestore(&priv->dp_port_lock, flags);
-
-			if (wakeup)
-				tty_port_tty_wakeup(&port->port);
+			spin_unlock(&priv->dp_port_lock);
 		} else if (opcode == DIGI_CMD_TRANSMIT_IDLE) {
-			spin_lock_irqsave(&priv->dp_port_lock, flags);
+			spin_lock(&priv->dp_port_lock);
 			priv->dp_transmit_idle = 1;
 			wake_up_interruptible(&priv->dp_transmit_idle_wait);
-			spin_unlock_irqrestore(&priv->dp_port_lock, flags);
+			spin_unlock(&priv->dp_port_lock);
 		} else if (opcode == DIGI_CMD_IFLUSH_FIFO) {
 			wake_up_interruptible(&priv->dp_flush_wait);
 		}

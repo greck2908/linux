@@ -35,39 +35,10 @@
 
 struct dp_mst_stream_allocation_table;
 
-/*
- * Allocate memory accessible by the GPU
- *
- * frame buffer allocations must be aligned to a 4096-byte boundary
- *
- * Returns virtual address, sets addr to physical address
- */
-void *dm_helpers_allocate_gpu_mem(
-		struct dc_context *ctx,
-		enum dc_gpu_mem_alloc_type type,
-		size_t size,
-		long long *addr);
-
-/*
- * Free the GPU-accessible memory at the virtual address pvMem
- */
-void dm_helpers_free_gpu_mem(
-		struct dc_context *ctx,
-		enum dc_gpu_mem_alloc_type type,
-		void *pvMem);
-
 enum dc_edid_status dm_helpers_parse_edid_caps(
 	struct dc_context *ctx,
 	const struct dc_edid *edid,
 	struct dc_edid_caps *edid_caps);
-
-
-/*
- * Update DP branch info
- */
-void dm_helpers_dp_update_branch_info(
-		struct dc_context *ctx,
-		const struct dc_link *link);
 
 /*
  * Writes payload allocation table in immediate downstream device.
@@ -79,23 +50,9 @@ bool dm_helpers_dp_mst_write_payload_allocation_table(
 		bool enable);
 
 /*
- * poll pending down reply
- */
-void dm_helpers_dp_mst_poll_pending_down_reply(
-	struct dc_context *ctx,
-	const struct dc_link *link);
-
-/*
- * Clear payload allocation table before enable MST DP link.
- */
-void dm_helpers_dp_mst_clear_payload_allocation_table(
-	struct dc_context *ctx,
-	const struct dc_link *link);
-
-/*
  * Polls for ACT (allocation change trigger) handled and
  */
-enum act_return_status dm_helpers_dp_mst_poll_for_allocation_change_trigger(
+bool dm_helpers_dp_mst_poll_for_allocation_change_trigger(
 		struct dc_context *ctx,
 		const struct dc_stream_state *stream);
 /*
@@ -113,7 +70,7 @@ bool dm_helpers_dp_mst_start_top_mgr(
 
 void dm_helpers_dp_mst_stop_top_mgr(
 		struct dc_context *ctx,
-		struct dc_link *link);
+		const struct dc_link *link);
 /**
  * OS specific aux read callback.
  */
@@ -139,21 +96,10 @@ bool dm_helpers_submit_i2c(
 		const struct dc_link *link,
 		struct i2c_command *cmd);
 
-bool dm_helpers_dp_write_dsc_enable(
-		struct dc_context *ctx,
-		const struct dc_stream_state *stream,
-		bool enable
-);
-bool dm_helpers_is_dp_sink_present(
-		struct dc_link *link);
-
 enum dc_edid_status dm_helpers_read_local_edid(
 		struct dc_context *ctx,
 		struct dc_link *link,
 		struct dc_sink *sink);
 
-void dm_set_dcn_clocks(
-		struct dc_context *ctx,
-		struct dc_clocks *clks);
 
 #endif /* __DM_HELPERS__ */

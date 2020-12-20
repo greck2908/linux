@@ -13,7 +13,6 @@
 
 #include <linux/atomic.h>
 #include <linux/cpumask.h>
-#include <linux/sizes.h>
 #include <linux/threads.h>
 
 #include <asm/cachectl.h>
@@ -22,14 +21,22 @@
 #include <asm/dsemul.h>
 #include <asm/mipsregs.h>
 #include <asm/prefetch.h>
-#include <asm/vdso/processor.h>
+
+/*
+ * Return current * instruction pointer ("program counter").
+ */
+#define current_text_addr() ({ __label__ _l; _l: &&_l;})
 
 /*
  * System setup and hardware flags..
  */
 
 extern unsigned int vced_count, vcei_count;
-extern int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src);
+
+/*
+ * MIPS does have an arch_pick_mmap_layout()
+ */
+#define HAVE_ARCH_PICK_MMAP_LAYOUT 1
 
 #ifdef CONFIG_32BIT
 #ifdef CONFIG_KVM_GUEST
@@ -73,10 +80,11 @@ extern int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src
 
 #endif
 
-#define VDSO_RANDOMIZE_SIZE	(TASK_IS_32BIT_ADDR ? SZ_1M : SZ_64M)
-
-extern unsigned long mips_stack_top(void);
-#define STACK_TOP		mips_stack_top()
+/*
+ * One page above the stack is used for branch delay slot "emulation".
+ * See dsemul.c for details.
+ */
+#define STACK_TOP	((TASK_SIZE & PAGE_MASK) - PAGE_SIZE)
 
 /*
  * This decides where the kernel will search for a free chunk of vm
@@ -133,7 +141,7 @@ struct mips_fpu_struct {
 
 #define NUM_DSP_REGS   6
 
-typedef unsigned long dspreg_t;
+typedef __u32 dspreg_t;
 
 struct mips_dsp_state {
 	dspreg_t	dspr[NUM_DSP_REGS];
@@ -252,7 +260,6 @@ struct thread_struct {
 	/* Saved cp0 stuff. */
 	unsigned long cp0_status;
 
-#ifdef CONFIG_MIPS_FP_SUPPORT
 	/* Saved fpu/fpu emulator stuff. */
 	struct mips_fpu_struct fpu FPU_ALIGN;
 	/* Assigned branch delay slot 'emulation' frame */
@@ -261,7 +268,6 @@ struct thread_struct {
 	unsigned long bd_emu_branch_pc;
 	/* PC to continue from following a branch delay slot 'emulation' */
 	unsigned long bd_emu_cont_pc;
-#endif
 #ifdef CONFIG_MIPS_MT_FPAFF
 	/* Emulated instruction count */
 	unsigned long emulated_fp;
@@ -298,21 +304,6 @@ struct thread_struct {
 #define FPAFF_INIT
 #endif /* CONFIG_MIPS_MT_FPAFF */
 
-#ifdef CONFIG_MIPS_FP_SUPPORT
-# define FPU_INIT						\
-	.fpu			= {				\
-		.fpr		= {{{0,},},},			\
-		.fcr31		= 0,				\
-		.msacsr		= 0,				\
-	},							\
-	/* Delay slot emulation */				\
-	.bd_emu_frame = ATOMIC_INIT(BD_EMUFRAME_NONE),		\
-	.bd_emu_branch_pc = 0,					\
-	.bd_emu_cont_pc = 0,
-#else
-# define FPU_INIT
-#endif
-
 #define INIT_THREAD  {						\
 	/*							\
 	 * Saved main processor registers			\
@@ -335,11 +326,19 @@ struct thread_struct {
 	/*							\
 	 * Saved FPU/FPU emulator stuff				\
 	 */							\
-	FPU_INIT						\
+	.fpu			= {				\
+		.fpr		= {{{0,},},},			\
+		.fcr31		= 0,				\
+		.msacsr		= 0,				\
+	},							\
 	/*							\
 	 * FPU affinity state (null if not FPAFF)		\
 	 */							\
 	FPAFF_INIT						\
+	/* Delay slot emulation */				\
+	.bd_emu_frame = ATOMIC_INIT(BD_EMUFRAME_NONE),		\
+	.bd_emu_branch_pc = 0,					\
+	.bd_emu_cont_pc = 0,					\
 	/*							\
 	 * Saved DSP stuff					\
 	 */							\
@@ -386,6 +385,8 @@ unsigned long get_wchan(struct task_struct *p);
 #define KSTK_EIP(tsk) (task_pt_regs(tsk)->cp0_epc)
 #define KSTK_ESP(tsk) (task_pt_regs(tsk)->regs[29])
 #define KSTK_STATUS(tsk) (task_pt_regs(tsk)->cp0_status)
+
+#define cpu_relax()	barrier()
 
 /*
  * Return_address is a replacement for __builtin_return_address(count)

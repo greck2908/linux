@@ -31,10 +31,8 @@
 
 #include "nouveau_display.h"
 
-struct nouveau_vma;
-
 struct nouveau_fbdev {
-	struct drm_fb_helper helper; /* must be first */
+	struct drm_fb_helper helper;
 	unsigned int saved_flags;
 	struct nvif_object surf2d;
 	struct nvif_object clip;
@@ -43,10 +41,6 @@ struct nouveau_fbdev {
 	struct nvif_object gdi;
 	struct nvif_object blit;
 	struct nvif_object twod;
-	struct nouveau_vma *vma;
-
-	struct mutex hotplug_lock;
-	bool hotplug_waiting;
 };
 
 void nouveau_fbcon_restore(void);
@@ -75,7 +69,7 @@ void nouveau_fbcon_accel_save_disable(struct drm_device *dev);
 void nouveau_fbcon_accel_restore(struct drm_device *dev);
 
 void nouveau_fbcon_output_poll_changed(struct drm_device *dev);
-void nouveau_fbcon_hotplug_resume(struct nouveau_fbdev *fbcon);
+
 extern int nouveau_nofbaccel;
 
 #endif /* __NV50_FBCON_H__ */

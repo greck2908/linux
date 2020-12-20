@@ -544,6 +544,7 @@ con3270_flush(void)
 	cp = condev;
 	if (!cp->view.dev)
 		return;
+	raw3270_pm_unfreeze(&cp->view);
 	raw3270_activate_view(&cp->view);
 	spin_lock_irqsave(&cp->view.lock, flags);
 	con3270_wait_write(cp);
@@ -628,7 +629,7 @@ con3270_init(void)
 		     (void (*)(unsigned long)) con3270_read_tasklet,
 		     (unsigned long) condev->read);
 
-	raw3270_add_view(&condev->view, &con3270_fn, 1, RAW3270_VIEW_LOCK_IRQ);
+	raw3270_add_view(&condev->view, &con3270_fn, 1);
 
 	INIT_LIST_HEAD(&condev->freemem);
 	for (i = 0; i < CON3270_STRING_PAGES; i++) {

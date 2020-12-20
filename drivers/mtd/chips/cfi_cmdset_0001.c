@@ -45,7 +45,6 @@
 #define I82802AB	0x00ad
 #define I82802AC	0x00ac
 #define PF38F4476	0x881c
-#define M28F00AP30	0x8963
 /* STMicroelectronics chips */
 #define M50LPW080       0x002F
 #define M50FLW080A	0x0080
@@ -376,17 +375,6 @@ static void cfi_fixup_major_minor(struct cfi_private *cfi,
 		extp->MinorVersion = '1';
 }
 
-static int cfi_is_micron_28F00AP30(struct cfi_private *cfi, struct flchip *chip)
-{
-	/*
-	 * Micron(was Numonyx) 1Gbit bottom boot are buggy w.r.t
-	 * Erase Supend for their small Erase Blocks(0x8000)
-	 */
-	if (cfi->mfr == CFI_MFR_INTEL && cfi->id == M28F00AP30)
-		return 1;
-	return 0;
-}
-
 static inline struct cfi_pri_intelext *
 read_pri_intelext(struct map_info *map, __u16 adr)
 {
@@ -420,9 +408,8 @@ read_pri_intelext(struct map_info *map, __u16 adr)
 		extra_size = 0;
 
 		/* Protection Register info */
-		if (extp->NumProtectionFields)
-			extra_size += (extp->NumProtectionFields - 1) *
-				      sizeof(struct cfi_intelext_otpinfo);
+		extra_size += (extp->NumProtectionFields - 1) *
+			      sizeof(struct cfi_intelext_otpinfo);
 	}
 
 	if (extp->MinorVersion >= '1') {
@@ -609,9 +596,8 @@ static struct mtd_info *cfi_intelext_setup(struct mtd_info *mtd)
 	mtd->size = devsize * cfi->numchips;
 
 	mtd->numeraseregions = cfi->cfiq->NumEraseRegions * cfi->numchips;
-	mtd->eraseregions = kcalloc(mtd->numeraseregions,
-				    sizeof(struct mtd_erase_region_info),
-				    GFP_KERNEL);
+	mtd->eraseregions = kzalloc(sizeof(struct mtd_erase_region_info)
+			* mtd->numeraseregions, GFP_KERNEL);
 	if (!mtd->eraseregions)
 		goto setup_err;
 
@@ -696,16 +682,14 @@ static int cfi_intelext_partition_fixup(struct mtd_info *mtd,
 	 */
 	if (extp && extp->MajorVersion == '1' && extp->MinorVersion >= '3'
 	    && extp->FeatureSupport & (1 << 9)) {
-		int offs = 0;
 		struct cfi_private *newcfi;
 		struct flchip *chip;
 		struct flchip_shared *shared;
-		int numregions, numparts, partshift, numvirtchips, i, j;
+		int offs, numregions, numparts, partshift, numvirtchips, i, j;
 
 		/* Protection Register info */
-		if (extp->NumProtectionFields)
-			offs = (extp->NumProtectionFields - 1) *
-			       sizeof(struct cfi_intelext_otpinfo);
+		offs = (extp->NumProtectionFields - 1) *
+		       sizeof(struct cfi_intelext_otpinfo);
 
 		/* Burst Read info */
 		offs += extp->extra[offs+1]+2;
@@ -759,13 +743,10 @@ static int cfi_intelext_partition_fixup(struct mtd_info *mtd,
 		}
 
 		numvirtchips = cfi->numchips * numparts;
-		newcfi = kmalloc(struct_size(newcfi, chips, numvirtchips),
-				 GFP_KERNEL);
+		newcfi = kmalloc(sizeof(struct cfi_private) + numvirtchips * sizeof(struct flchip), GFP_KERNEL);
 		if (!newcfi)
 			return -ENOMEM;
-		shared = kmalloc_array(cfi->numchips,
-				       sizeof(struct flchip_shared),
-				       GFP_KERNEL);
+		shared = kmalloc(sizeof(struct flchip_shared) * cfi->numchips, GFP_KERNEL);
 		if (!shared) {
 			kfree(newcfi);
 			return -ENOMEM;
@@ -837,7 +818,7 @@ static int chip_ready (struct map_info *map, struct flchip *chip, unsigned long 
 			/* Someone else might have been playing with it. */
 			return -EAGAIN;
 		}
-		fallthrough;
+		/* Fall through */
 	case FL_READY:
 	case FL_CFI_QUERY:
 	case FL_JEDEC_QUERY:
@@ -850,30 +831,21 @@ static int chip_ready (struct map_info *map, struct flchip *chip, unsigned long 
 		     (mode == FL_WRITING && (cfip->SuspendCmdSupport & 1))))
 			goto sleep;
 
-		/* Do not allow suspend iff read/write to EB address */
-		if ((adr & chip->in_progress_block_mask) ==
-		    chip->in_progress_block_addr)
-			goto sleep;
-
-		/* do not suspend small EBs, buggy Micron Chips */
-		if (cfi_is_micron_28F00AP30(cfi, chip) &&
-		    (chip->in_progress_block_mask == ~(0x8000-1)))
-			goto sleep;
 
 		/* Erase suspend */
-		map_write(map, CMD(0xB0), chip->in_progress_block_addr);
+		map_write(map, CMD(0xB0), adr);
 
 		/* If the flash has finished erasing, then 'erase suspend'
 		 * appears to make some (28F320) flash devices switch to
 		 * 'read' mode.  Make sure that we switch to 'read status'
 		 * mode so we get the right data. --rmk
 		 */
-		map_write(map, CMD(0x70), chip->in_progress_block_addr);
+		map_write(map, CMD(0x70), adr);
 		chip->oldstate = FL_ERASING;
 		chip->state = FL_ERASE_SUSPENDING;
 		chip->erase_suspended = 1;
 		for (;;) {
-			status = map_read(map, chip->in_progress_block_addr);
+			status = map_read(map, adr);
 			if (map_word_andequal(map, status, status_OK, status_OK))
 			        break;
 
@@ -910,7 +882,7 @@ static int chip_ready (struct map_info *map, struct flchip *chip, unsigned long 
 		/* Only if there's no operation suspended... */
 		if (mode == FL_READY && chip->oldstate == FL_READY)
 			return 0;
-		fallthrough;
+		/* Fall through */
 	default:
 	sleep:
 		set_current_state(TASK_UNINTERRUPTIBLE);
@@ -1069,8 +1041,8 @@ static void put_chip(struct map_info *map, struct flchip *chip, unsigned long ad
 		   sending the 0x70 (Read Status) command to an erasing
 		   chip and expecting it to be ignored, that's what we
 		   do. */
-		map_write(map, CMD(0xd0), chip->in_progress_block_addr);
-		map_write(map, CMD(0x70), chip->in_progress_block_addr);
+		map_write(map, CMD(0xd0), adr);
+		map_write(map, CMD(0x70), adr);
 		chip->oldstate = FL_READY;
 		chip->state = FL_ERASING;
 		break;
@@ -1356,7 +1328,7 @@ static int do_point_onechip (struct map_info *map, struct flchip *chip, loff_t a
 {
 	unsigned long cmd_addr;
 	struct cfi_private *cfi = map->fldrv_priv;
-	int ret;
+	int ret = 0;
 
 	adr += chip->start;
 
@@ -1386,7 +1358,7 @@ static int cfi_intelext_point(struct mtd_info *mtd, loff_t from, size_t len,
 	struct cfi_private *cfi = map->fldrv_priv;
 	unsigned long ofs, last_end = 0;
 	int chipnum;
-	int ret;
+	int ret = 0;
 
 	if (!map->virt)
 		return -EINVAL;
@@ -1553,7 +1525,7 @@ static int __xipram do_write_oneword(struct map_info *map, struct flchip *chip,
 {
 	struct cfi_private *cfi = map->fldrv_priv;
 	map_word status, write_cmd;
-	int ret;
+	int ret=0;
 
 	adr += chip->start;
 
@@ -1627,7 +1599,7 @@ static int cfi_intelext_write_words (struct mtd_info *mtd, loff_t to , size_t le
 {
 	struct map_info *map = mtd->priv;
 	struct cfi_private *cfi = map->fldrv_priv;
-	int ret;
+	int ret = 0;
 	int chipnum;
 	unsigned long ofs;
 
@@ -1874,7 +1846,7 @@ static int cfi_intelext_writev (struct mtd_info *mtd, const struct kvec *vecs,
 	struct map_info *map = mtd->priv;
 	struct cfi_private *cfi = map->fldrv_priv;
 	int wbufsize = cfi_interleave(cfi) << cfi->cfiq->MaxBufWriteSize;
-	int ret;
+	int ret = 0;
 	int chipnum;
 	unsigned long ofs, vec_seek, i;
 	size_t len = 0;
@@ -1961,8 +1933,6 @@ static int __xipram do_erase_oneblock(struct map_info *map, struct flchip *chip,
 	map_write(map, CMD(0xD0), adr);
 	chip->state = FL_ERASING;
 	chip->erase_suspended = 0;
-	chip->in_progress_block_addr = adr;
-	chip->in_progress_block_mask = ~(len - 1);
 
 	ret = INVAL_CACHE_AND_WAIT(map, chip, adr,
 				   adr, len,
@@ -2023,8 +1993,20 @@ static int __xipram do_erase_oneblock(struct map_info *map, struct flchip *chip,
 
 static int cfi_intelext_erase_varsize(struct mtd_info *mtd, struct erase_info *instr)
 {
-	return cfi_varsize_frob(mtd, do_erase_oneblock, instr->addr,
-				instr->len, NULL);
+	unsigned long ofs, len;
+	int ret;
+
+	ofs = instr->addr;
+	len = instr->len;
+
+	ret = cfi_varsize_frob(mtd, do_erase_oneblock, ofs, len, NULL);
+	if (ret)
+		return ret;
+
+	instr->state = MTD_ERASE_DONE;
+	mtd_erase_callback(instr);
+
+	return 0;
 }
 
 static void cfi_intelext_sync (struct mtd_info *mtd)

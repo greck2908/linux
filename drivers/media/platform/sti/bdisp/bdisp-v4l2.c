@@ -1,7 +1,7 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) STMicroelectronics SA 2014
  * Authors: Fabien Dessenne <fabien.dessenne@st.com> for STMicroelectronics.
+ * License terms:  GNU General Public License (GPL), version 2
  */
 
 #include <linux/errno.h>
@@ -651,7 +651,8 @@ static int bdisp_release(struct file *file)
 
 	dev_dbg(bdisp->dev, "%s\n", __func__);
 
-	mutex_lock(&bdisp->lock);
+	if (mutex_lock_interruptible(&bdisp->lock))
+		return -ERESTARTSYS;
 
 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
 
@@ -687,10 +688,15 @@ static int bdisp_querycap(struct file *file, void *fh,
 	struct bdisp_ctx *ctx = fh_to_ctx(fh);
 	struct bdisp_dev *bdisp = ctx->bdisp_dev;
 
-	strscpy(cap->driver, bdisp->pdev->name, sizeof(cap->driver));
-	strscpy(cap->card, bdisp->pdev->name, sizeof(cap->card));
+	strlcpy(cap->driver, bdisp->pdev->name, sizeof(cap->driver));
+	strlcpy(cap->card, bdisp->pdev->name, sizeof(cap->card));
 	snprintf(cap->bus_info, sizeof(cap->bus_info), "platform:%s%d",
 		 BDISP_NAME, bdisp->id);
+
+	cap->device_caps = V4L2_CAP_STREAMING | V4L2_CAP_VIDEO_M2M;
+
+	cap->capabilities = cap->device_caps | V4L2_CAP_DEVICE_CAPS;
+
 	return 0;
 }
 
@@ -1053,7 +1059,6 @@ static int bdisp_register_device(struct bdisp_dev *bdisp)
 	bdisp->vdev.lock        = &bdisp->lock;
 	bdisp->vdev.vfl_dir     = VFL_DIR_M2M;
 	bdisp->vdev.v4l2_dev    = &bdisp->v4l2_dev;
-	bdisp->vdev.device_caps = V4L2_CAP_STREAMING | V4L2_CAP_VIDEO_M2M;
 	snprintf(bdisp->vdev.name, sizeof(bdisp->vdev.name), "%s.%d",
 		 BDISP_NAME, bdisp->id);
 
@@ -1066,7 +1071,7 @@ static int bdisp_register_device(struct bdisp_dev *bdisp)
 		return PTR_ERR(bdisp->m2m.m2m_dev);
 	}
 
-	ret = video_register_device(&bdisp->vdev, VFL_TYPE_VIDEO, -1);
+	ret = video_register_device(&bdisp->vdev, VFL_TYPE_GRABBER, -1);
 	if (ret) {
 		dev_err(bdisp->dev,
 			"%s(): failed to register video device\n", __func__);
@@ -1274,8 +1279,6 @@ static int bdisp_remove(struct platform_device *pdev)
 	if (!IS_ERR(bdisp->clock))
 		clk_unprepare(bdisp->clock);
 
-	destroy_workqueue(bdisp->work_queue);
-
 	dev_dbg(&pdev->dev, "%s driver unloaded\n", pdev->name);
 
 	return 0;
@@ -1293,10 +1296,6 @@ static int bdisp_probe(struct platform_device *pdev)
 	bdisp = devm_kzalloc(dev, sizeof(struct bdisp_dev), GFP_KERNEL);
 	if (!bdisp)
 		return -ENOMEM;
-
-	ret = dma_coerce_mask_and_coherent(dev, DMA_BIT_MASK(32));
-	if (ret)
-		return ret;
 
 	bdisp->pdev = pdev;
 	bdisp->dev = dev;
@@ -1319,22 +1318,20 @@ static int bdisp_probe(struct platform_device *pdev)
 	bdisp->regs = devm_ioremap_resource(dev, res);
 	if (IS_ERR(bdisp->regs)) {
 		dev_err(dev, "failed to get regs\n");
-		ret = PTR_ERR(bdisp->regs);
-		goto err_wq;
+		return PTR_ERR(bdisp->regs);
 	}
 
 	bdisp->clock = devm_clk_get(dev, BDISP_NAME);
 	if (IS_ERR(bdisp->clock)) {
 		dev_err(dev, "failed to get clock\n");
-		ret = PTR_ERR(bdisp->clock);
-		goto err_wq;
+		return PTR_ERR(bdisp->clock);
 	}
 
 	ret = clk_prepare(bdisp->clock);
 	if (ret < 0) {
 		dev_err(dev, "clock prepare failed\n");
 		bdisp->clock = ERR_PTR(-EINVAL);
-		goto err_wq;
+		return ret;
 	}
 
 	res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
@@ -1360,14 +1357,18 @@ static int bdisp_probe(struct platform_device *pdev)
 	}
 
 	/* Debug */
-	bdisp_debugfs_create(bdisp);
+	ret = bdisp_debugfs_create(bdisp);
+	if (ret) {
+		dev_err(dev, "failed to create debugfs\n");
+		goto err_v4l2;
+	}
 
 	/* Power management */
 	pm_runtime_enable(dev);
 	ret = pm_runtime_get_sync(dev);
 	if (ret < 0) {
 		dev_err(dev, "failed to set PM\n");
-		goto err_pm;
+		goto err_dbg;
 	}
 
 	/* Filters */
@@ -1395,13 +1396,14 @@ err_filter:
 	bdisp_hw_free_filters(bdisp->dev);
 err_pm:
 	pm_runtime_put(dev);
+err_dbg:
 	bdisp_debugfs_remove(bdisp);
+err_v4l2:
 	v4l2_device_unregister(&bdisp->v4l2_dev);
 err_clk:
 	if (!IS_ERR(bdisp->clock))
 		clk_unprepare(bdisp->clock);
-err_wq:
-	destroy_workqueue(bdisp->work_queue);
+
 	return ret;
 }
 

@@ -135,11 +135,12 @@ static void ipoib_mcast_free(struct ipoib_mcast *mcast)
 	kfree(mcast);
 }
 
-static struct ipoib_mcast *ipoib_mcast_alloc(struct net_device *dev)
+static struct ipoib_mcast *ipoib_mcast_alloc(struct net_device *dev,
+					     int can_sleep)
 {
 	struct ipoib_mcast *mcast;
 
-	mcast = kzalloc(sizeof(*mcast), GFP_ATOMIC);
+	mcast = kzalloc(sizeof *mcast, can_sleep ? GFP_KERNEL : GFP_ATOMIC);
 	if (!mcast)
 		return NULL;
 
@@ -217,7 +218,6 @@ static int ipoib_mcast_join_finish(struct ipoib_mcast *mcast,
 	struct rdma_ah_attr av;
 	int ret;
 	int set_qkey = 0;
-	int mtu;
 
 	mcast->mcmember = *mcmember;
 
@@ -240,12 +240,13 @@ static int ipoib_mcast_join_finish(struct ipoib_mcast *mcast,
 		priv->broadcast->mcmember.flow_label = mcmember->flow_label;
 		priv->broadcast->mcmember.hop_limit = mcmember->hop_limit;
 		/* assume if the admin and the mcast are the same both can be changed */
-		mtu = rdma_mtu_enum_to_int(priv->ca,  priv->port,
-					   priv->broadcast->mcmember.mtu);
 		if (priv->mcast_mtu == priv->admin_mtu)
-			priv->admin_mtu = IPOIB_UD_MTU(mtu);
-		priv->mcast_mtu = IPOIB_UD_MTU(mtu);
-		rn->mtu = priv->mcast_mtu;
+			priv->admin_mtu =
+			priv->mcast_mtu =
+			IPOIB_UD_MTU(ib_mtu_enum_to_int(priv->broadcast->mcmember.mtu));
+		else
+			priv->mcast_mtu =
+			IPOIB_UD_MTU(ib_mtu_enum_to_int(priv->broadcast->mcmember.mtu));
 
 		priv->qkey = be32_to_cpu(priv->broadcast->mcmember.qkey);
 		spin_unlock_irq(&priv->lock);
@@ -598,7 +599,7 @@ void ipoib_mcast_join_task(struct work_struct *work)
 	if (!priv->broadcast) {
 		struct ipoib_mcast *broadcast;
 
-		broadcast = ipoib_mcast_alloc(dev);
+		broadcast = ipoib_mcast_alloc(dev, 0);
 		if (!broadcast) {
 			ipoib_warn(priv, "failed to allocate broadcast group\n");
 			/*
@@ -680,13 +681,15 @@ void ipoib_mcast_start_thread(struct net_device *dev)
 	spin_unlock_irqrestore(&priv->lock, flags);
 }
 
-void ipoib_mcast_stop_thread(struct net_device *dev)
+int ipoib_mcast_stop_thread(struct net_device *dev)
 {
 	struct ipoib_dev_priv *priv = ipoib_priv(dev);
 
 	ipoib_dbg_mcast(priv, "stopping multicast thread\n");
 
 	cancel_delayed_work_sync(&priv->mcast_task);
+
+	return 0;
 }
 
 static int ipoib_mcast_leave(struct net_device *dev, struct ipoib_mcast *mcast)
@@ -779,7 +782,7 @@ void ipoib_mcast_send(struct net_device *dev, u8 *daddr, struct sk_buff *skb)
 			ipoib_dbg_mcast(priv, "setting up send only multicast group for %pI6\n",
 					mgid);
 
-			mcast = ipoib_mcast_alloc(dev);
+			mcast = ipoib_mcast_alloc(dev, 0);
 			if (!mcast) {
 				ipoib_warn(priv, "unable to allocate memory "
 					   "for multicast structure\n");
@@ -819,7 +822,6 @@ void ipoib_mcast_send(struct net_device *dev, u8 *daddr, struct sk_buff *skb)
 			if (neigh && list_empty(&neigh->list)) {
 				kref_get(&mcast->ah->ref);
 				neigh->ah	= mcast->ah;
-				neigh->ah->valid = 1;
 				list_add_tail(&neigh->list, &mcast->neigh_list);
 			}
 		}
@@ -884,6 +886,7 @@ void ipoib_mcast_restart_task(struct work_struct *work)
 	struct netdev_hw_addr *ha;
 	struct ipoib_mcast *mcast, *tmcast;
 	LIST_HEAD(remove_list);
+	unsigned long flags;
 	struct ib_sa_mcmember_rec rec;
 
 	if (!test_bit(IPOIB_FLAG_OPER_UP, &priv->flags))
@@ -895,8 +898,9 @@ void ipoib_mcast_restart_task(struct work_struct *work)
 
 	ipoib_dbg_mcast(priv, "restarting multicast task\n");
 
-	netif_addr_lock_bh(dev);
-	spin_lock_irq(&priv->lock);
+	local_irq_save(flags);
+	netif_addr_lock(dev);
+	spin_lock(&priv->lock);
 
 	/*
 	 * Unfortunately, the networking core only gives us a list of all of
@@ -915,7 +919,7 @@ void ipoib_mcast_restart_task(struct work_struct *work)
 		if (!ipoib_mcast_addr_is_valid(ha->addr, dev->broadcast))
 			continue;
 
-		memcpy(mgid.raw, ha->addr + 4, sizeof(mgid));
+		memcpy(mgid.raw, ha->addr + 4, sizeof mgid);
 
 		mcast = __ipoib_mcast_find(dev, &mgid);
 		if (!mcast || test_bit(IPOIB_MCAST_FLAG_SENDONLY, &mcast->flags)) {
@@ -933,7 +937,7 @@ void ipoib_mcast_restart_task(struct work_struct *work)
 			ipoib_dbg_mcast(priv, "adding multicast entry for mgid %pI6\n",
 					mgid.raw);
 
-			nmcast = ipoib_mcast_alloc(dev);
+			nmcast = ipoib_mcast_alloc(dev, 0);
 			if (!nmcast) {
 				ipoib_warn(priv, "unable to allocate memory for multicast structure\n");
 				continue;
@@ -974,8 +978,9 @@ void ipoib_mcast_restart_task(struct work_struct *work)
 		}
 	}
 
-	spin_unlock_irq(&priv->lock);
-	netif_addr_unlock_bh(dev);
+	spin_unlock(&priv->lock);
+	netif_addr_unlock(dev);
+	local_irq_restore(flags);
 
 	ipoib_mcast_remove_list(&remove_list);
 
@@ -983,9 +988,9 @@ void ipoib_mcast_restart_task(struct work_struct *work)
 	 * Double check that we are still up
 	 */
 	if (test_bit(IPOIB_FLAG_OPER_UP, &priv->flags)) {
-		spin_lock_irq(&priv->lock);
+		spin_lock_irqsave(&priv->lock, flags);
 		__ipoib_mcast_schedule_join_thread(priv, NULL, 0);
-		spin_unlock_irq(&priv->lock);
+		spin_unlock_irqrestore(&priv->lock, flags);
 	}
 }
 
@@ -995,7 +1000,7 @@ struct ipoib_mcast_iter *ipoib_mcast_iter_init(struct net_device *dev)
 {
 	struct ipoib_mcast_iter *iter;
 
-	iter = kmalloc(sizeof(*iter), GFP_KERNEL);
+	iter = kmalloc(sizeof *iter, GFP_KERNEL);
 	if (!iter)
 		return NULL;
 

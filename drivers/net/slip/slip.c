@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * slip.c	This module implements the SLIP protocol for kernel-based
  *		devices like TTY.  It interfaces between a raw TTY, and the
@@ -80,6 +79,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/if_arp.h>
 #include <linux/if_slip.h>
+#include <linux/compat.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/slab.h>
@@ -452,16 +452,12 @@ static void slip_transmit(struct work_struct *work)
  */
 static void slip_write_wakeup(struct tty_struct *tty)
 {
-	struct slip *sl;
+	struct slip *sl = tty->disc_data;
 
-	rcu_read_lock();
-	sl = rcu_dereference(tty->disc_data);
-	if (sl)
-		schedule_work(&sl->tx_work);
-	rcu_read_unlock();
+	schedule_work(&sl->tx_work);
 }
 
-static void sl_tx_timeout(struct net_device *dev, unsigned int txqueue)
+static void sl_tx_timeout(struct net_device *dev)
 {
 	struct slip *sl = netdev_priv(dev);
 
@@ -735,7 +731,7 @@ static void sl_sync(void)
 
 
 /* Find a free SLIP channel, and link in this `tty' line. */
-static struct slip *sl_alloc(void)
+static struct slip *sl_alloc(dev_t line)
 {
 	int i;
 	char name[IFNAMSIZ];
@@ -813,7 +809,7 @@ static int slip_open(struct tty_struct *tty)
 
 	/* OK.  Find a free SLIP channel to use. */
 	err = -ENFILE;
-	sl = sl_alloc();
+	sl = sl_alloc(tty_devnum(tty));
 	if (sl == NULL)
 		goto err_exit;
 
@@ -859,11 +855,6 @@ err_free_chan:
 	sl->tty = NULL;
 	tty->disc_data = NULL;
 	clear_bit(SLF_INUSE, &sl->flags);
-	sl_free_netdev(sl->dev);
-	/* do not call free_netdev before rtnl_unlock */
-	rtnl_unlock();
-	free_netdev(sl->dev);
-	return err;
 
 err_exit:
 	rtnl_unlock();
@@ -889,11 +880,10 @@ static void slip_close(struct tty_struct *tty)
 		return;
 
 	spin_lock_bh(&sl->lock);
-	rcu_assign_pointer(tty->disc_data, NULL);
+	tty->disc_data = NULL;
 	sl->tty = NULL;
 	spin_unlock_bh(&sl->lock);
 
-	synchronize_rcu();
 	flush_work(&sl->tx_work);
 
 	/* VSV = very important to remove timers */
@@ -1177,6 +1167,27 @@ static int slip_ioctl(struct tty_struct *tty, struct file *file,
 	}
 }
 
+#ifdef CONFIG_COMPAT
+static long slip_compat_ioctl(struct tty_struct *tty, struct file *file,
+					unsigned int cmd, unsigned long arg)
+{
+	switch (cmd) {
+	case SIOCGIFNAME:
+	case SIOCGIFENCAP:
+	case SIOCSIFENCAP:
+	case SIOCSIFHWADDR:
+	case SIOCSKEEPALIVE:
+	case SIOCGKEEPALIVE:
+	case SIOCSOUTFILL:
+	case SIOCGOUTFILL:
+		return slip_ioctl(tty, file, cmd,
+				  (unsigned long)compat_ptr(arg));
+	}
+
+	return -ENOIOCTLCMD;
+}
+#endif
+
 /* VSV changes start here */
 #ifdef CONFIG_SLIP_SMART
 /* function do_ioctl called from net/core/dev.c
@@ -1269,6 +1280,9 @@ static struct tty_ldisc_ops sl_ldisc = {
 	.close	 	= slip_close,
 	.hangup	 	= slip_hangup,
 	.ioctl		= slip_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl	= slip_compat_ioctl,
+#endif
 	.receive_buf	= slip_receive_buf,
 	.write_wakeup	= slip_write_wakeup,
 };
@@ -1293,7 +1307,7 @@ static int __init slip_init(void)
 	printk(KERN_INFO "SLIP linefill/keepalive option.\n");
 #endif
 
-	slip_devs = kcalloc(slip_maxdev, sizeof(struct net_device *),
+	slip_devs = kzalloc(sizeof(struct net_device *)*slip_maxdev,
 								GFP_KERNEL);
 	if (!slip_devs)
 		return -ENOMEM;

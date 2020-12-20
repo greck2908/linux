@@ -377,13 +377,10 @@ static struct dentry *reiserfs_lookup(struct inode *dir, struct dentry *dentry,
 
 		/*
 		 * Propagate the private flag so we know we're
-		 * in the priv tree.  Also clear IOP_XATTR
-		 * since we don't have xattrs on xattr files.
+		 * in the priv tree
 		 */
-		if (IS_PRIVATE(dir)) {
+		if (IS_PRIVATE(dir))
 			inode->i_flags |= S_PRIVATE;
-			inode->i_opflags &= ~IOP_XATTR;
-		}
 	}
 	reiserfs_write_unlock(dir->i_sb);
 	if (retval == IO_ERROR) {
@@ -690,7 +687,8 @@ static int reiserfs_create(struct inode *dir, struct dentry *dentry, umode_t mod
 	reiserfs_update_inode_transaction(inode);
 	reiserfs_update_inode_transaction(dir);
 
-	d_instantiate_new(dentry, inode);
+	unlock_new_inode(inode);
+	d_instantiate(dentry, inode);
 	retval = journal_end(&th);
 
 out_failed:
@@ -773,7 +771,8 @@ static int reiserfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode
 		goto out_failed;
 	}
 
-	d_instantiate_new(dentry, inode);
+	unlock_new_inode(inode);
+	d_instantiate(dentry, inode);
 	retval = journal_end(&th);
 
 out_failed:
@@ -838,10 +837,10 @@ static int reiserfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode
 	 */
 	INC_DIR_INODE_NLINK(dir)
 
-	retval = reiserfs_new_inode(&th, dir, mode, NULL /*symlink */,
-				    old_format_only(dir->i_sb) ?
-				    EMPTY_DIR_SIZE_V1 : EMPTY_DIR_SIZE,
-				    dentry, inode, &security);
+	    retval = reiserfs_new_inode(&th, dir, mode, NULL /*symlink */ ,
+					old_format_only(dir->i_sb) ?
+					EMPTY_DIR_SIZE_V1 : EMPTY_DIR_SIZE,
+					dentry, inode, &security);
 	if (retval) {
 		DEC_DIR_INODE_NLINK(dir)
 		goto out_failed;
@@ -872,7 +871,8 @@ static int reiserfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode
 	/* the above add_entry did not update dir's stat data */
 	reiserfs_update_sd(&th, dir);
 
-	d_instantiate_new(dentry, inode);
+	unlock_new_inode(inode);
+	d_instantiate(dentry, inode);
 	retval = journal_end(&th);
 out_failed:
 	reiserfs_write_unlock(dir->i_sb);
@@ -967,7 +967,7 @@ static int reiserfs_rmdir(struct inode *dir, struct dentry *dentry)
 	reiserfs_update_sd(&th, inode);
 
 	DEC_DIR_INODE_NLINK(dir)
-	dir->i_size -= (DEH_SIZE + de.de_entrylen);
+	    dir->i_size -= (DEH_SIZE + de.de_entrylen);
 	reiserfs_update_sd(&th, dir);
 
 	/* prevent empty directory from getting lost */
@@ -1187,7 +1187,8 @@ static int reiserfs_symlink(struct inode *parent_dir,
 		goto out_failed;
 	}
 
-	d_instantiate_new(dentry, inode);
+	unlock_new_inode(inode);
+	d_instantiate(dentry, inode);
 	retval = journal_end(&th);
 out_failed:
 	reiserfs_write_unlock(parent_dir->i_sb);
@@ -1319,7 +1320,7 @@ static int reiserfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	int jbegin_count;
 	umode_t old_inode_mode;
 	unsigned long savelink = 1;
-	struct timespec64 ctime;
+	struct timespec ctime;
 
 	if (flags & ~RENAME_NOREPLACE)
 		return -EINVAL;

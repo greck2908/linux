@@ -376,11 +376,15 @@ static int falcon_get_lock(struct Scsi_Host *instance)
 	if (IS_A_TT())
 		return 1;
 
-	if (stdma_is_locked_by(scsi_falcon_intr))
+	if (stdma_is_locked_by(scsi_falcon_intr) &&
+	    instance->hostt->can_queue > 1)
 		return 1;
 
-	/* stdma_lock() may sleep which means it can't be used here */
-	return stdma_try_lock(scsi_falcon_intr, instance);
+	if (in_interrupt())
+		return stdma_try_lock(scsi_falcon_intr, instance);
+
+	stdma_lock(scsi_falcon_intr, instance);
+	return 1;
 }
 
 #ifndef MODULE
@@ -710,7 +714,7 @@ static struct scsi_host_template atari_scsi_template = {
 	.eh_host_reset_handler	= atari_scsi_host_reset,
 	.this_id		= 7,
 	.cmd_per_lun		= 2,
-	.dma_boundary		= PAGE_SIZE - 1,
+	.use_clustering		= DISABLE_CLUSTERING,
 	.cmd_size		= NCR5380_CMD_SIZE,
 };
 
@@ -738,7 +742,7 @@ static int __init atari_scsi_probe(struct platform_device *pdev)
 		atari_scsi_template.sg_tablesize = SG_ALL;
 	} else {
 		atari_scsi_template.can_queue    = 1;
-		atari_scsi_template.sg_tablesize = 1;
+		atari_scsi_template.sg_tablesize = SG_NONE;
 	}
 
 	if (setup_can_queue > 0)
@@ -747,23 +751,21 @@ static int __init atari_scsi_probe(struct platform_device *pdev)
 	if (setup_cmd_per_lun > 0)
 		atari_scsi_template.cmd_per_lun = setup_cmd_per_lun;
 
-	/* Don't increase sg_tablesize on Falcon! */
-	if (ATARIHW_PRESENT(TT_SCSI) && setup_sg_tablesize > 0)
+	/* Leave sg_tablesize at 0 on a Falcon! */
+	if (ATARIHW_PRESENT(TT_SCSI) && setup_sg_tablesize >= 0)
 		atari_scsi_template.sg_tablesize = setup_sg_tablesize;
 
 	if (setup_hostid >= 0) {
 		atari_scsi_template.this_id = setup_hostid & 7;
-	} else if (IS_REACHABLE(CONFIG_NVRAM)) {
+	} else {
 		/* Test if a host id is set in the NVRam */
-		if (ATARIHW_PRESENT(TT_CLK)) {
-			unsigned char b;
-			loff_t offset = 16;
-			ssize_t count = nvram_read(&b, 1, &offset);
+		if (ATARIHW_PRESENT(TT_CLK) && nvram_check_checksum()) {
+			unsigned char b = nvram_read_byte(16);
 
 			/* Arbitration enabled? (for TOS)
 			 * If yes, use configured host ID
 			 */
-			if ((count == 1) && (b & 0x80))
+			if (b & 0x80)
 				atari_scsi_template.this_id = b & 7;
 		}
 	}

@@ -1,13 +1,25 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 2007 Oracle.  All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public
+ * License v2 as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public
+ * License along with this program; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 021110-1307, USA.
  */
 
-#ifndef BTRFS_INODE_H
-#define BTRFS_INODE_H
+#ifndef __BTRFS_I__
+#define __BTRFS_I__
 
 #include <linux/hash.h>
-#include <linux/refcount.h>
 #include "extent_map.h"
 #include "extent_io.h"
 #include "ordered-data.h"
@@ -20,29 +32,17 @@
  * ordered operations list so that we make sure to flush out any
  * new data the application may have written before commit.
  */
-enum {
-	BTRFS_INODE_FLUSH_ON_CLOSE,
-	BTRFS_INODE_DUMMY,
-	BTRFS_INODE_IN_DEFRAG,
-	BTRFS_INODE_HAS_ASYNC_EXTENT,
-	 /*
-	  * Always set under the VFS' inode lock, otherwise it can cause races
-	  * during fsync (we start as a fast fsync and then end up in a full
-	  * fsync racing with ordered extent completion).
-	  */
-	BTRFS_INODE_NEEDS_FULL_SYNC,
-	BTRFS_INODE_COPY_EVERYTHING,
-	BTRFS_INODE_IN_DELALLOC_LIST,
-	BTRFS_INODE_HAS_PROPS,
-	BTRFS_INODE_SNAPSHOT_FLUSH,
-	/*
-	 * Set and used when logging an inode and it serves to signal that an
-	 * inode does not have xattrs, so subsequent fsyncs can avoid searching
-	 * for xattrs to log. This bit must be cleared whenever a xattr is added
-	 * to an inode.
-	 */
-	BTRFS_INODE_NO_XATTRS,
-};
+#define BTRFS_INODE_ORDERED_DATA_CLOSE		0
+#define BTRFS_INODE_ORPHAN_META_RESERVED	1
+#define BTRFS_INODE_DUMMY			2
+#define BTRFS_INODE_IN_DEFRAG			3
+#define BTRFS_INODE_HAS_ORPHAN_ITEM		4
+#define BTRFS_INODE_HAS_ASYNC_EXTENT		5
+#define BTRFS_INODE_NEEDS_FULL_SYNC		6
+#define BTRFS_INODE_COPY_EVERYTHING		7
+#define BTRFS_INODE_IN_DELALLOC_LIST		8
+#define BTRFS_INODE_READDIO_NEED_LOCK		9
+#define BTRFS_INODE_HAS_PROPS		        10
 
 /* in memory btrfs inode */
 struct btrfs_inode {
@@ -57,8 +57,7 @@ struct btrfs_inode {
 	/*
 	 * Lock for counters and all fields used to determine if the inode is in
 	 * the log or not (last_trans, last_sub_trans, last_log_commit,
-	 * logged_trans), to access/update new_delalloc_bytes and to update the
-	 * VFS' inode number of bytes used.
+	 * logged_trans).
 	 */
 	spinlock_t lock;
 
@@ -73,14 +72,11 @@ struct btrfs_inode {
 	 */
 	struct extent_io_tree io_failure_tree;
 
-	/*
-	 * Keep track of where the inode has extent items mapped in order to
-	 * make sure the i_size adjustments are accurate
-	 */
-	struct extent_io_tree file_extent_tree;
-
 	/* held while logging the inode in tree-log.c */
 	struct mutex log_mutex;
+
+	/* held while doing delalloc reservations */
+	struct mutex delalloc_mutex;
 
 	/* used to order data wrt metadata */
 	struct btrfs_ordered_inode_tree ordered_tree;
@@ -164,17 +160,6 @@ struct btrfs_inode {
 	u64 last_unlink_trans;
 
 	/*
-	 * The id/generation of the last transaction where this inode was
-	 * either the source or the destination of a clone/dedupe operation.
-	 * Used when logging an inode to know if there are shared extents that
-	 * need special care when logging checksum items, to avoid duplicate
-	 * checksum items in a log (which can lead to a corruption where we end
-	 * up with missing checksum ranges after log replay).
-	 * Protected by the vfs inode lock.
-	 */
-	u64 last_reflink_trans;
-
-	/*
 	 * Number of bytes outstanding that are going to need csums.  This is
 	 * used in ENOSPC accounting.
 	 */
@@ -206,18 +191,26 @@ struct btrfs_inode {
 	struct btrfs_delayed_node *delayed_node;
 
 	/* File creation time. */
-	struct timespec64 i_otime;
+	struct timespec i_otime;
 
 	/* Hook into fs_info->delayed_iputs */
 	struct list_head delayed_iput;
+	long delayed_iput_count;
+
+	/*
+	 * To avoid races between lockless (i_mutex not held) direct IO writes
+	 * and concurrent fsync requests. Direct IO writes must acquire read
+	 * access on this semaphore for creating an extent map and its
+	 * corresponding ordered extent. The fast fsync path must acquire write
+	 * access on this semaphore before it collects ordered extents and
+	 * extent maps.
+	 */
+	struct rw_semaphore dio_sem;
 
 	struct inode vfs_inode;
 };
 
-static inline u32 btrfs_inode_sectorsize(const struct btrfs_inode *inode)
-{
-	return inode->root->fs_info->sectorsize;
-}
+extern unsigned char btrfs_filetype_table[];
 
 static inline struct btrfs_inode *BTRFS_I(const struct inode *inode)
 {
@@ -227,7 +220,7 @@ static inline struct btrfs_inode *BTRFS_I(const struct inode *inode)
 static inline unsigned long btrfs_inode_hash(u64 objectid,
 					     const struct btrfs_root *root)
 {
-	u64 h = objectid ^ (root->root_key.objectid * GOLDEN_RATIO_PRIME);
+	u64 h = objectid ^ (root->objectid * GOLDEN_RATIO_PRIME);
 
 #if BITS_PER_LONG == 32
 	h = (h >> 32) ^ (h & 0xffffffff);
@@ -274,11 +267,6 @@ static inline bool btrfs_is_free_space_inode(struct btrfs_inode *inode)
 	return false;
 }
 
-static inline bool is_data_inode(struct inode *inode)
-{
-	return btrfs_ino(BTRFS_I(inode)) != BTRFS_BTREE_INODE_OBJECTID;
-}
-
 static inline void btrfs_mod_outstanding_extents(struct btrfs_inode *inode,
 						 int mod)
 {
@@ -312,52 +300,71 @@ static inline int btrfs_inode_in_log(struct btrfs_inode *inode, u64 generation)
 	return ret;
 }
 
+#define BTRFS_DIO_ORIG_BIO_SUBMITTED	0x1
+
 struct btrfs_dio_private {
 	struct inode *inode;
+	unsigned long flags;
 	u64 logical_offset;
 	u64 disk_bytenr;
 	u64 bytes;
+	void *private;
 
-	/*
-	 * References to this structure. There is one reference per in-flight
-	 * bio plus one while we're still setting up.
-	 */
-	refcount_t refs;
+	/* number of bios pending for this dio */
+	atomic_t pending_bios;
+
+	/* IO errors */
+	int errors;
+
+	/* orig_bio is our btrfs_io_bio */
+	struct bio *orig_bio;
 
 	/* dio_bio came from fs/direct-io.c */
 	struct bio *dio_bio;
 
-	/* Array of checksums */
-	u8 csums[];
+	/*
+	 * The original bio may be split to several sub-bios, this is
+	 * done during endio of sub-bios
+	 */
+	blk_status_t (*subio_endio)(struct inode *, struct btrfs_io_bio *,
+			blk_status_t);
 };
 
-/* Array of bytes with variable length, hexadecimal format 0x1234 */
-#define CSUM_FMT				"0x%*phN"
-#define CSUM_FMT_VALUE(size, bytes)		size, bytes
+/*
+ * Disable DIO read nolock optimization, so new dio readers will be forced
+ * to grab i_mutex. It is used to avoid the endless truncate due to
+ * nonlocked dio read.
+ */
+static inline void btrfs_inode_block_unlocked_dio(struct btrfs_inode *inode)
+{
+	set_bit(BTRFS_INODE_READDIO_NEED_LOCK, &inode->runtime_flags);
+	smp_mb();
+}
+
+static inline void btrfs_inode_resume_unlocked_dio(struct btrfs_inode *inode)
+{
+	smp_mb__before_atomic();
+	clear_bit(BTRFS_INODE_READDIO_NEED_LOCK, &inode->runtime_flags);
+}
 
 static inline void btrfs_print_data_csum_error(struct btrfs_inode *inode,
-		u64 logical_start, u8 *csum, u8 *csum_expected, int mirror_num)
+		u64 logical_start, u32 csum, u32 csum_expected, int mirror_num)
 {
 	struct btrfs_root *root = inode->root;
-	const u32 csum_size = root->fs_info->csum_size;
 
 	/* Output minus objectid, which is more meaningful */
-	if (root->root_key.objectid >= BTRFS_LAST_FREE_OBJECTID)
+	if (root->objectid >= BTRFS_LAST_FREE_OBJECTID)
 		btrfs_warn_rl(root->fs_info,
-"csum failed root %lld ino %lld off %llu csum " CSUM_FMT " expected csum " CSUM_FMT " mirror %d",
-			root->root_key.objectid, btrfs_ino(inode),
-			logical_start,
-			CSUM_FMT_VALUE(csum_size, csum),
-			CSUM_FMT_VALUE(csum_size, csum_expected),
-			mirror_num);
+	"csum failed root %lld ino %lld off %llu csum 0x%08x expected csum 0x%08x mirror %d",
+			root->objectid, btrfs_ino(inode),
+			logical_start, csum, csum_expected, mirror_num);
 	else
 		btrfs_warn_rl(root->fs_info,
-"csum failed root %llu ino %llu off %llu csum " CSUM_FMT " expected csum " CSUM_FMT " mirror %d",
-			root->root_key.objectid, btrfs_ino(inode),
-			logical_start,
-			CSUM_FMT_VALUE(csum_size, csum),
-			CSUM_FMT_VALUE(csum_size, csum_expected),
-			mirror_num);
+	"csum failed root %llu ino %llu off %llu csum 0x%08x expected csum 0x%08x mirror %d",
+			root->objectid, btrfs_ino(inode),
+			logical_start, csum, csum_expected, mirror_num);
 }
+
+bool btrfs_page_exists_in_range(struct inode *inode, loff_t start, loff_t end);
 
 #endif

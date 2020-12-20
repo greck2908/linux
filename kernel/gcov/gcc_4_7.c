@@ -19,14 +19,14 @@
 #include <linux/vmalloc.h>
 #include "gcov.h"
 
-#if (__GNUC__ >= 10)
-#define GCOV_COUNTERS			8
-#elif (__GNUC__ >= 7)
+#if (__GNUC__ >= 7)
 #define GCOV_COUNTERS			9
 #elif (__GNUC__ > 5) || (__GNUC__ == 5 && __GNUC_MINOR__ >= 1)
 #define GCOV_COUNTERS			10
-#else
+#elif __GNUC__ == 4 && __GNUC_MINOR__ >= 9
 #define GCOV_COUNTERS			9
+#else
+#define GCOV_COUNTERS			8
 #endif
 
 #define GCOV_TAG_FUNCTION_LENGTH	3
@@ -68,7 +68,7 @@ struct gcov_fn_info {
 	unsigned int ident;
 	unsigned int lineno_checksum;
 	unsigned int cfg_checksum;
-	struct gcov_ctr_info ctrs[];
+	struct gcov_ctr_info ctrs[0];
 };
 
 /**
@@ -150,18 +150,6 @@ void gcov_info_unlink(struct gcov_info *prev, struct gcov_info *info)
 		gcov_info_head = info->next;
 }
 
-/**
- * gcov_info_within_module - check if a profiling data set belongs to a module
- * @info: profiling data set
- * @mod: module
- *
- * Returns true if profiling data belongs module, false otherwise.
- */
-bool gcov_info_within_module(struct gcov_info *info, struct module *mod)
-{
-	return within_module((unsigned long)info, mod);
-}
-
 /* Symbolic links to be created for each profiling data file. */
 const struct gcov_link gcov_link[] = {
 	{ OBJ_TREE, "gcno" },	/* Link to .gcno file in $(objtree). */
@@ -227,10 +215,10 @@ int gcov_info_is_compatible(struct gcov_info *info1, struct gcov_info *info2)
 
 /**
  * gcov_info_add - add up profiling data
- * @dst: profiling data set to which data is added
- * @src: profiling data set which is added
+ * @dest: profiling data set to which data is added
+ * @source: profiling data set which is added
  *
- * Adds profiling counts of @src to @dst.
+ * Adds profiling counts of @source to @dest.
  */
 void gcov_info_add(struct gcov_info *dst, struct gcov_info *src)
 {

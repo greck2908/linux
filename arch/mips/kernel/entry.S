@@ -19,7 +19,7 @@
 #include <asm/thread_info.h>
 #include <asm/war.h>
 
-#ifndef CONFIG_PREEMPTION
+#ifndef CONFIG_PREEMPT
 #define resume_kernel	restore_all
 #else
 #define __ret_from_irq	ret_from_exception
@@ -27,7 +27,7 @@
 
 	.text
 	.align	5
-#ifndef CONFIG_PREEMPTION
+#ifndef CONFIG_PREEMPT
 FEXPORT(ret_from_exception)
 	local_irq_disable			# preempt stop
 	b	__ret_from_irq
@@ -53,19 +53,20 @@ resume_userspace:
 	bnez	t0, work_pending
 	j	restore_all
 
-#ifdef CONFIG_PREEMPTION
+#ifdef CONFIG_PREEMPT
 resume_kernel:
 	local_irq_disable
 	lw	t0, TI_PRE_COUNT($28)
 	bnez	t0, restore_all
+need_resched:
 	LONG_L	t0, TI_FLAGS($28)
 	andi	t1, t0, _TIF_NEED_RESCHED
 	beqz	t1, restore_all
 	LONG_L	t0, PT_STATUS(sp)		# Interrupts off?
 	andi	t0, 1
 	beqz	t0, restore_all
-	PTR_LA	ra, restore_all
-	j	preempt_schedule_irq
+	jal	preempt_schedule_irq
+	b	need_resched
 #endif
 
 FEXPORT(ret_from_kernel_thread)
@@ -78,10 +79,6 @@ FEXPORT(ret_from_fork)
 	jal	schedule_tail		# a0 = struct task_struct *prev
 
 FEXPORT(syscall_exit)
-#ifdef CONFIG_DEBUG_RSEQ
-	move	a0, sp
-	jal	rseq_syscall
-#endif
 	local_irq_disable		# make sure need_resched and
 					# signals dont change between
 					# sampling and return
@@ -144,10 +141,6 @@ work_notifysig:				# deal with pending signals and
 	j	resume_userspace_check
 
 FEXPORT(syscall_exit_partial)
-#ifdef CONFIG_DEBUG_RSEQ
-	move	a0, sp
-	jal	rseq_syscall
-#endif
 	local_irq_disable		# make sure need_resched doesn't
 					# change between and return
 	LONG_L	a2, TI_FLAGS($28)	# current->work
@@ -169,8 +162,8 @@ syscall_exit_work:
 	jal	syscall_trace_leave
 	b	resume_userspace
 
-#if defined(CONFIG_CPU_MIPSR2) || defined(CONFIG_CPU_MIPSR5) || \
-    defined(CONFIG_CPU_MIPSR6) || defined(CONFIG_MIPS_MT)
+#if defined(CONFIG_CPU_MIPSR2) || defined(CONFIG_CPU_MIPSR6) || \
+    defined(CONFIG_MIPS_MT)
 
 /*
  * MIPS32R2 Instruction Hazard Barrier - must be called
@@ -183,4 +176,4 @@ LEAF(mips_ihb)
 	nop
 	END(mips_ihb)
 
-#endif /* CONFIG_CPU_MIPSR2 - CONFIG_CPU_MIPSR6 or CONFIG_MIPS_MT */
+#endif /* CONFIG_CPU_MIPSR2 or CONFIG_CPU_MIPSR6 or CONFIG_MIPS_MT */

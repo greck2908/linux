@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * IPv4 over IEEE 1394, per RFC 2734
  * IPv6 over IEEE 1394, per RFC 3146
@@ -250,11 +249,7 @@ static int fwnet_header_cache(const struct neighbour *neigh,
 	h = (struct fwnet_header *)((u8 *)hh->hh_data + HH_DATA_OFF(sizeof(*h)));
 	h->h_proto = type;
 	memcpy(h->h_dest, neigh->ha, net->addr_len);
-
-	/* Pairs with the READ_ONCE() in neigh_resolve_output(),
-	 * neigh_hh_output() and neigh_update_hhs().
-	 */
-	smp_store_release(&hh->hh_len, FWNET_HLEN);
+	hh->hh_len = FWNET_HLEN;
 
 	return 0;
 }
@@ -1126,7 +1121,7 @@ static int fwnet_broadcast_start(struct fwnet_device *dev)
 	max_receive = 1U << (dev->card->max_receive + 1);
 	num_packets = (FWNET_ISO_PAGE_COUNT * PAGE_SIZE) / max_receive;
 
-	ptrptr = kmalloc_array(num_packets, sizeof(void *), GFP_KERNEL);
+	ptrptr = kmalloc(sizeof(void *) * num_packets, GFP_KERNEL);
 	if (!ptrptr) {
 		retval = -ENOMEM;
 		goto failed;
@@ -1485,14 +1480,9 @@ static int fwnet_probe(struct fw_unit *unit,
 		goto out;
 	dev->local_fifo = dev->handler.offset;
 
-	/*
-	 * default MTU: RFC 2734 cl. 4, RFC 3146 cl. 4
-	 * maximum MTU: RFC 2734 cl. 4.2, fragment encapsulation header's
-	 *              maximum possible datagram_size + 1 = 0xfff + 1
-	 */
 	net->mtu = 1500U;
 	net->min_mtu = ETH_MIN_MTU;
-	net->max_mtu = 4096U;
+	net->max_mtu = 0xfff;
 
 	/* Set our hardware address while we're at it */
 	ha = (union fwnet_hwaddr *)net->dev_addr;

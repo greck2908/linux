@@ -105,11 +105,13 @@ static void sunxi_musb_work(struct work_struct *work)
 		devctl = readb(musb->mregs + SUNXI_MUSB_DEVCTL);
 		if (test_bit(SUNXI_MUSB_FL_HOSTMODE, &glue->flags)) {
 			set_bit(SUNXI_MUSB_FL_VBUS_ON, &glue->flags);
+			musb->xceiv->otg->default_a = 1;
 			musb->xceiv->otg->state = OTG_STATE_A_WAIT_VRISE;
 			MUSB_HST_MODE(musb);
 			devctl |= MUSB_DEVCTL_SESSION;
 		} else {
 			clear_bit(SUNXI_MUSB_FL_VBUS_ON, &glue->flags);
+			musb->xceiv->otg->default_a = 0;
 			musb->xceiv->otg->state = OTG_STATE_B_IDLE;
 			MUSB_DEV_MODE(musb);
 			devctl &= ~MUSB_DEVCTL_SESSION;
@@ -345,7 +347,7 @@ static int sunxi_musb_set_mode(struct musb *musb, u8 mode)
 	if (glue->phy_mode == new_mode)
 		return 0;
 
-	if (musb->port_mode != MUSB_OTG) {
+	if (musb->port_mode != MUSB_PORT_MODE_DUAL_ROLE) {
 		dev_err(musb->controller->parent,
 			"Error changing modes is only supported in dual role mode\n");
 		return -EINVAL;
@@ -407,7 +409,7 @@ static u32 sunxi_musb_busctl_offset(u8 epnum, u16 offset)
 	return SUNXI_MUSB_TXFUNCADDR + offset;
 }
 
-static u8 sunxi_musb_readb(void __iomem *addr, u32 offset)
+static u8 sunxi_musb_readb(const void __iomem *addr, unsigned offset)
 {
 	struct sunxi_glue *glue;
 
@@ -520,7 +522,7 @@ static void sunxi_musb_writeb(void __iomem *addr, unsigned offset, u8 data)
 		(int)(addr - sunxi_musb->mregs));
 }
 
-static u16 sunxi_musb_readw(void __iomem *addr, u32 offset)
+static u16 sunxi_musb_readw(const void __iomem *addr, unsigned offset)
 {
 	if (addr == sunxi_musb->mregs) {
 		/* generic control or fifo control reg access */
@@ -649,8 +651,10 @@ static const struct musb_hdrc_config sunxi_musb_hdrc_config = {
 	.fifo_cfg_size  = ARRAY_SIZE(sunxi_musb_mode_cfg),
 	.multipoint	= true,
 	.dyn_fifo	= true,
+	.soft_con       = true,
 	.num_eps	= SUNXI_MUSB_MAX_EP_NUM,
 	.ram_bits	= SUNXI_MUSB_RAM_BITS,
+	.dma		= 0,
 };
 
 static struct musb_hdrc_config sunxi_musb_hdrc_config_h3 = {
@@ -658,8 +662,10 @@ static struct musb_hdrc_config sunxi_musb_hdrc_config_h3 = {
 	.fifo_cfg_size  = ARRAY_SIZE(sunxi_musb_mode_cfg_h3),
 	.multipoint	= true,
 	.dyn_fifo	= true,
+	.soft_con       = true,
 	.num_eps	= SUNXI_MUSB_MAX_EP_NUM_H3,
 	.ram_bits	= SUNXI_MUSB_RAM_BITS,
+	.dma		= 0,
 };
 
 
@@ -684,19 +690,19 @@ static int sunxi_musb_probe(struct platform_device *pdev)
 	switch (usb_get_dr_mode(&pdev->dev)) {
 #if defined CONFIG_USB_MUSB_DUAL_ROLE || defined CONFIG_USB_MUSB_HOST
 	case USB_DR_MODE_HOST:
-		pdata.mode = MUSB_HOST;
+		pdata.mode = MUSB_PORT_MODE_HOST;
 		glue->phy_mode = PHY_MODE_USB_HOST;
 		break;
 #endif
 #if defined CONFIG_USB_MUSB_DUAL_ROLE || defined CONFIG_USB_MUSB_GADGET
 	case USB_DR_MODE_PERIPHERAL:
-		pdata.mode = MUSB_PERIPHERAL;
+		pdata.mode = MUSB_PORT_MODE_GADGET;
 		glue->phy_mode = PHY_MODE_USB_DEVICE;
 		break;
 #endif
 #ifdef CONFIG_USB_MUSB_DUAL_ROLE
 	case USB_DR_MODE_OTG:
-		pdata.mode = MUSB_OTG;
+		pdata.mode = MUSB_PORT_MODE_DUAL_ROLE;
 		glue->phy_mode = PHY_MODE_USB_OTG;
 		break;
 #endif
@@ -781,8 +787,6 @@ static int sunxi_musb_probe(struct platform_device *pdev)
 	pinfo.name	 = "musb-hdrc";
 	pinfo.id	= PLATFORM_DEVID_AUTO;
 	pinfo.parent	= &pdev->dev;
-	pinfo.fwnode	= of_fwnode_handle(pdev->dev.of_node);
-	pinfo.of_node_reused = true;
 	pinfo.res	= pdev->resource;
 	pinfo.num_res	= pdev->num_resources;
 	pinfo.data	= &pdata;

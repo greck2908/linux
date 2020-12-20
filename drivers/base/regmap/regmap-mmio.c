@@ -1,8 +1,20 @@
-// SPDX-License-Identifier: GPL-2.0
-//
-// Register map access API - MMIO support
-//
-// Copyright (c) 2012, NVIDIA CORPORATION.  All rights reserved.
+/*
+ * Register map access API - MMIO support
+ *
+ * Copyright (c) 2012, NVIDIA CORPORATION.  All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms and conditions of the GNU General Public License,
+ * version 2, as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ * more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 
 #include <linux/clk.h>
 #include <linux/err.h>
@@ -16,9 +28,6 @@
 struct regmap_mmio_context {
 	void __iomem *regs;
 	unsigned val_bytes;
-	bool relaxed_mmio;
-
-	bool attached_clk;
 	struct clk *clk;
 
 	void (*reg_write)(struct regmap_mmio_context *ctx,
@@ -76,25 +85,11 @@ static void regmap_mmio_write8(struct regmap_mmio_context *ctx,
 	writeb(val, ctx->regs + reg);
 }
 
-static void regmap_mmio_write8_relaxed(struct regmap_mmio_context *ctx,
-				unsigned int reg,
-				unsigned int val)
-{
-	writeb_relaxed(val, ctx->regs + reg);
-}
-
 static void regmap_mmio_write16le(struct regmap_mmio_context *ctx,
 				  unsigned int reg,
 				  unsigned int val)
 {
 	writew(val, ctx->regs + reg);
-}
-
-static void regmap_mmio_write16le_relaxed(struct regmap_mmio_context *ctx,
-				  unsigned int reg,
-				  unsigned int val)
-{
-	writew_relaxed(val, ctx->regs + reg);
 }
 
 static void regmap_mmio_write16be(struct regmap_mmio_context *ctx,
@@ -111,13 +106,6 @@ static void regmap_mmio_write32le(struct regmap_mmio_context *ctx,
 	writel(val, ctx->regs + reg);
 }
 
-static void regmap_mmio_write32le_relaxed(struct regmap_mmio_context *ctx,
-				  unsigned int reg,
-				  unsigned int val)
-{
-	writel_relaxed(val, ctx->regs + reg);
-}
-
 static void regmap_mmio_write32be(struct regmap_mmio_context *ctx,
 				  unsigned int reg,
 				  unsigned int val)
@@ -131,13 +119,6 @@ static void regmap_mmio_write64le(struct regmap_mmio_context *ctx,
 				  unsigned int val)
 {
 	writeq(val, ctx->regs + reg);
-}
-
-static void regmap_mmio_write64le_relaxed(struct regmap_mmio_context *ctx,
-				  unsigned int reg,
-				  unsigned int val)
-{
-	writeq_relaxed(val, ctx->regs + reg);
 }
 #endif
 
@@ -166,22 +147,10 @@ static unsigned int regmap_mmio_read8(struct regmap_mmio_context *ctx,
 	return readb(ctx->regs + reg);
 }
 
-static unsigned int regmap_mmio_read8_relaxed(struct regmap_mmio_context *ctx,
-				      unsigned int reg)
-{
-	return readb_relaxed(ctx->regs + reg);
-}
-
 static unsigned int regmap_mmio_read16le(struct regmap_mmio_context *ctx,
 				         unsigned int reg)
 {
 	return readw(ctx->regs + reg);
-}
-
-static unsigned int regmap_mmio_read16le_relaxed(struct regmap_mmio_context *ctx,
-						 unsigned int reg)
-{
-	return readw_relaxed(ctx->regs + reg);
 }
 
 static unsigned int regmap_mmio_read16be(struct regmap_mmio_context *ctx,
@@ -196,12 +165,6 @@ static unsigned int regmap_mmio_read32le(struct regmap_mmio_context *ctx,
 	return readl(ctx->regs + reg);
 }
 
-static unsigned int regmap_mmio_read32le_relaxed(struct regmap_mmio_context *ctx,
-						 unsigned int reg)
-{
-	return readl_relaxed(ctx->regs + reg);
-}
-
 static unsigned int regmap_mmio_read32be(struct regmap_mmio_context *ctx,
 				         unsigned int reg)
 {
@@ -213,12 +176,6 @@ static unsigned int regmap_mmio_read64le(struct regmap_mmio_context *ctx,
 				         unsigned int reg)
 {
 	return readq(ctx->regs + reg);
-}
-
-static unsigned int regmap_mmio_read64le_relaxed(struct regmap_mmio_context *ctx,
-						 unsigned int reg)
-{
-	return readq_relaxed(ctx->regs + reg);
 }
 #endif
 
@@ -247,8 +204,7 @@ static void regmap_mmio_free_context(void *context)
 
 	if (!IS_ERR(ctx->clk)) {
 		clk_unprepare(ctx->clk);
-		if (!ctx->attached_clk)
-			clk_put(ctx->clk);
+		clk_put(ctx->clk);
 	}
 	kfree(context);
 }
@@ -290,7 +246,6 @@ static struct regmap_mmio_context *regmap_mmio_gen_context(struct device *dev,
 
 	ctx->regs = regs;
 	ctx->val_bytes = config->val_bits / 8;
-	ctx->relaxed_mmio = config->use_relaxed_mmio;
 	ctx->clk = ERR_PTR(-ENODEV);
 
 	switch (regmap_get_val_endian(dev, &regmap_mmio, config)) {
@@ -301,41 +256,21 @@ static struct regmap_mmio_context *regmap_mmio_gen_context(struct device *dev,
 #endif
 		switch (config->val_bits) {
 		case 8:
-			if (ctx->relaxed_mmio) {
-				ctx->reg_read = regmap_mmio_read8_relaxed;
-				ctx->reg_write = regmap_mmio_write8_relaxed;
-			} else {
-				ctx->reg_read = regmap_mmio_read8;
-				ctx->reg_write = regmap_mmio_write8;
-			}
+			ctx->reg_read = regmap_mmio_read8;
+			ctx->reg_write = regmap_mmio_write8;
 			break;
 		case 16:
-			if (ctx->relaxed_mmio) {
-				ctx->reg_read = regmap_mmio_read16le_relaxed;
-				ctx->reg_write = regmap_mmio_write16le_relaxed;
-			} else {
-				ctx->reg_read = regmap_mmio_read16le;
-				ctx->reg_write = regmap_mmio_write16le;
-			}
+			ctx->reg_read = regmap_mmio_read16le;
+			ctx->reg_write = regmap_mmio_write16le;
 			break;
 		case 32:
-			if (ctx->relaxed_mmio) {
-				ctx->reg_read = regmap_mmio_read32le_relaxed;
-				ctx->reg_write = regmap_mmio_write32le_relaxed;
-			} else {
-				ctx->reg_read = regmap_mmio_read32le;
-				ctx->reg_write = regmap_mmio_write32le;
-			}
+			ctx->reg_read = regmap_mmio_read32le;
+			ctx->reg_write = regmap_mmio_write32le;
 			break;
 #ifdef CONFIG_64BIT
 		case 64:
-			if (ctx->relaxed_mmio) {
-				ctx->reg_read = regmap_mmio_read64le_relaxed;
-				ctx->reg_write = regmap_mmio_write64le_relaxed;
-			} else {
-				ctx->reg_read = regmap_mmio_read64le;
-				ctx->reg_write = regmap_mmio_write64le;
-			}
+			ctx->reg_read = regmap_mmio_read64le;
+			ctx->reg_write = regmap_mmio_write64le;
 			break;
 #endif
 		default:
@@ -427,27 +362,5 @@ struct regmap *__devm_regmap_init_mmio_clk(struct device *dev,
 				  lock_key, lock_name);
 }
 EXPORT_SYMBOL_GPL(__devm_regmap_init_mmio_clk);
-
-int regmap_mmio_attach_clk(struct regmap *map, struct clk *clk)
-{
-	struct regmap_mmio_context *ctx = map->bus_context;
-
-	ctx->clk = clk;
-	ctx->attached_clk = true;
-
-	return clk_prepare(ctx->clk);
-}
-EXPORT_SYMBOL_GPL(regmap_mmio_attach_clk);
-
-void regmap_mmio_detach_clk(struct regmap *map)
-{
-	struct regmap_mmio_context *ctx = map->bus_context;
-
-	clk_unprepare(ctx->clk);
-
-	ctx->attached_clk = false;
-	ctx->clk = NULL;
-}
-EXPORT_SYMBOL_GPL(regmap_mmio_detach_clk);
 
 MODULE_LICENSE("GPL v2");

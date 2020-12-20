@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  *  Derived from arch/i386/kernel/irq.c
  *    Copyright (C) 1992 Linus Torvalds
@@ -8,6 +7,11 @@
  *    Copyright (C) 1996-2001 Cort Dougan
  *  Adapted for Power Macintosh by Paul Mackerras
  *    Copyright (C) 1996 Paul Mackerras (paulus@cs.anu.edu.au)
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version
+ * 2 of the License, or (at your option) any later version.
  *
  * This file contains the code used to make IRQ descriptions in the
  * device tree to actual irq numbers on an interrupt controller
@@ -22,6 +26,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
+#include <linux/of_pci.h>
 #include <linux/string.h>
 #include <linux/slab.h>
 
@@ -78,8 +83,9 @@ EXPORT_SYMBOL_GPL(of_irq_find_parent);
 
 /**
  * of_irq_parse_raw - Low level interrupt tree parsing
+ * @parent:	the device interrupt parent
  * @addr:	address specifier (start of "reg" property of the device) in be32 format
- * @out_irq:	structure of_phandle_args updated by this function
+ * @out_irq:	structure of_irq updated by this function
  *
  * Returns 0 on success and a negative number on error
  *
@@ -277,7 +283,7 @@ EXPORT_SYMBOL_GPL(of_irq_parse_raw);
  * of_irq_parse_one - Resolve an interrupt for a device
  * @device: the device whose interrupt is to be resolved
  * @index: index of the interrupt to resolve
- * @out_irq: structure of_phandle_args filled by this function
+ * @out_irq: structure of_irq filled by this function
  *
  * This function resolves an interrupt for a node by walking the interrupt tree,
  * finding which interrupt controller node it is attached to, and returning the
@@ -500,7 +506,7 @@ void __init of_irq_init(const struct of_device_id *matches)
 		 * pointer, interrupt-parent device_node etc.
 		 */
 		desc = kzalloc(sizeof(*desc), GFP_KERNEL);
-		if (!desc) {
+		if (WARN_ON(!desc)) {
 			of_node_put(np);
 			goto err;
 		}
@@ -576,57 +582,55 @@ err:
 	}
 }
 
-static u32 __of_msi_map_id(struct device *dev, struct device_node **np,
-			    u32 id_in)
+static u32 __of_msi_map_rid(struct device *dev, struct device_node **np,
+			    u32 rid_in)
 {
 	struct device *parent_dev;
-	u32 id_out = id_in;
+	u32 rid_out = rid_in;
 
 	/*
 	 * Walk up the device parent links looking for one with a
 	 * "msi-map" property.
 	 */
 	for (parent_dev = dev; parent_dev; parent_dev = parent_dev->parent)
-		if (!of_map_id(parent_dev->of_node, id_in, "msi-map",
-				"msi-map-mask", np, &id_out))
+		if (!of_pci_map_rid(parent_dev->of_node, rid_in, "msi-map",
+				    "msi-map-mask", np, &rid_out))
 			break;
-	return id_out;
+	return rid_out;
 }
 
 /**
- * of_msi_map_id - Map a MSI ID for a device.
+ * of_msi_map_rid - Map a MSI requester ID for a device.
  * @dev: device for which the mapping is to be done.
  * @msi_np: device node of the expected msi controller.
- * @id_in: unmapped MSI ID for the device.
+ * @rid_in: unmapped MSI requester ID for the device.
  *
  * Walk up the device hierarchy looking for devices with a "msi-map"
- * property.  If found, apply the mapping to @id_in.
+ * property.  If found, apply the mapping to @rid_in.
  *
- * Returns the mapped MSI ID.
+ * Returns the mapped MSI requester ID.
  */
-u32 of_msi_map_id(struct device *dev, struct device_node *msi_np, u32 id_in)
+u32 of_msi_map_rid(struct device *dev, struct device_node *msi_np, u32 rid_in)
 {
-	return __of_msi_map_id(dev, &msi_np, id_in);
+	return __of_msi_map_rid(dev, &msi_np, rid_in);
 }
 
 /**
  * of_msi_map_get_device_domain - Use msi-map to find the relevant MSI domain
  * @dev: device for which the mapping is to be done.
- * @id: Device ID.
- * @bus_token: Bus token
+ * @rid: Requester ID for the device.
  *
  * Walk up the device hierarchy looking for devices with a "msi-map"
  * property.
  *
  * Returns: the MSI domain for this device (or NULL on failure)
  */
-struct irq_domain *of_msi_map_get_device_domain(struct device *dev, u32 id,
-						u32 bus_token)
+struct irq_domain *of_msi_map_get_device_domain(struct device *dev, u32 rid)
 {
 	struct device_node *np = NULL;
 
-	__of_msi_map_id(dev, &np, id);
-	return irq_find_matching_host(np, bus_token);
+	__of_msi_map_rid(dev, &np, rid);
+	return irq_find_matching_host(np, DOMAIN_BUS_PCI_MSI);
 }
 
 /**

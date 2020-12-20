@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
+#include "sched.h"
+
 /*
  * stop-task scheduling class.
  *
@@ -7,19 +9,12 @@
  *
  * See kernel/stop_machine.c
  */
-#include "sched.h"
 
 #ifdef CONFIG_SMP
 static int
-select_task_rq_stop(struct task_struct *p, int cpu, int flags)
+select_task_rq_stop(struct task_struct *p, int cpu, int sd_flag, int flags)
 {
 	return task_cpu(p); /* stop tasks as never migrate */
-}
-
-static int
-balance_stop(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
-{
-	return sched_stop_runnable(rq);
 }
 #endif /* CONFIG_SMP */
 
@@ -29,18 +24,19 @@ check_preempt_curr_stop(struct rq *rq, struct task_struct *p, int flags)
 	/* we're never preempted */
 }
 
-static void set_next_task_stop(struct rq *rq, struct task_struct *stop, bool first)
+static struct task_struct *
+pick_next_task_stop(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
-	stop->se.exec_start = rq_clock_task(rq);
-}
+	struct task_struct *stop = rq->stop;
 
-static struct task_struct *pick_next_task_stop(struct rq *rq)
-{
-	if (!sched_stop_runnable(rq))
+	if (!stop || !task_on_rq_queued(stop))
 		return NULL;
 
-	set_next_task_stop(rq, rq->stop, true);
-	return rq->stop;
+	put_prev_task(rq, prev);
+
+	stop->se.exec_start = rq_clock_task(rq);
+
+	return stop;
 }
 
 static void
@@ -79,16 +75,15 @@ static void put_prev_task_stop(struct rq *rq, struct task_struct *prev)
 	cgroup_account_cputime(curr, delta_exec);
 }
 
-/*
- * scheduler tick hitting a task of our scheduling class.
- *
- * NOTE: This function can be called remotely by the tick offload that
- * goes along full dynticks. Therefore no local assumption can be made
- * and everything must be accessed through the @rq and @curr passed in
- * parameters.
- */
 static void task_tick_stop(struct rq *rq, struct task_struct *curr, int queued)
 {
+}
+
+static void set_curr_task_stop(struct rq *rq)
+{
+	struct task_struct *stop = rq->stop;
+
+	stop->se.exec_start = rq_clock_task(rq);
 }
 
 static void switched_to_stop(struct rq *rq, struct task_struct *p)
@@ -102,6 +97,12 @@ prio_changed_stop(struct rq *rq, struct task_struct *p, int oldprio)
 	BUG(); /* how!?, what priority? */
 }
 
+static unsigned int
+get_rr_interval_stop(struct rq *rq, struct task_struct *task)
+{
+	return 0;
+}
+
 static void update_curr_stop(struct rq *rq)
 {
 }
@@ -109,7 +110,8 @@ static void update_curr_stop(struct rq *rq)
 /*
  * Simple, special scheduling class for the per-CPU stop tasks:
  */
-DEFINE_SCHED_CLASS(stop) = {
+const struct sched_class stop_sched_class = {
+	.next			= &dl_sched_class,
 
 	.enqueue_task		= enqueue_task_stop,
 	.dequeue_task		= dequeue_task_stop,
@@ -119,15 +121,16 @@ DEFINE_SCHED_CLASS(stop) = {
 
 	.pick_next_task		= pick_next_task_stop,
 	.put_prev_task		= put_prev_task_stop,
-	.set_next_task          = set_next_task_stop,
 
 #ifdef CONFIG_SMP
-	.balance		= balance_stop,
 	.select_task_rq		= select_task_rq_stop,
 	.set_cpus_allowed	= set_cpus_allowed_common,
 #endif
 
+	.set_curr_task          = set_curr_task_stop,
 	.task_tick		= task_tick_stop,
+
+	.get_rr_interval	= get_rr_interval_stop,
 
 	.prio_changed		= prio_changed_stop,
 	.switched_to		= switched_to_stop,

@@ -1,26 +1,34 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) Fuzhou Rockchip Electronics Co.Ltd
  * Author: Chris Zhong <zyw@rock-chips.com>
+ *
+ * This software is licensed under the terms of the GNU General Public
+ * License version 2, as published by the Free Software Foundation, and
+ * may be copied, distributed, and modified under those terms.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  */
+
+#include <drm/drmP.h>
+#include <drm/drm_atomic_helper.h>
+#include <drm/drm_crtc_helper.h>
+#include <drm/drm_dp_helper.h>
+#include <drm/drm_edid.h>
+#include <drm/drm_of.h>
 
 #include <linux/clk.h>
 #include <linux/component.h>
 #include <linux/extcon.h>
 #include <linux/firmware.h>
-#include <linux/mfd/syscon.h>
-#include <linux/phy/phy.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
+#include <linux/mfd/syscon.h>
+#include <linux/phy/phy.h>
 
 #include <sound/hdmi-codec.h>
-
-#include <drm/drm_atomic_helper.h>
-#include <drm/drm_dp_helper.h>
-#include <drm/drm_edid.h>
-#include <drm/drm_of.h>
-#include <drm/drm_probe_helper.h>
-#include <drm/drm_simple_kms_helper.h>
 
 #include "cdn-dp-core.h"
 #include "cdn-dp-reg.h"
@@ -35,6 +43,8 @@
 #define GRF_SOC_CON9		0x6224
 #define DP_SEL_VOP_LIT		BIT(12)
 #define GRF_SOC_CON26		0x6268
+#define UPHY_SEL_BIT		3
+#define UPHY_SEL_MASK		BIT(19)
 #define DPTX_HPD_SEL		(3 << 12)
 #define DPTX_HPD_DEL		(2 << 12)
 #define DPTX_HPD_SEL_MASK	(3 << 28)
@@ -266,9 +276,11 @@ static int cdn_dp_connector_get_modes(struct drm_connector *connector)
 
 		dp->sink_has_audio = drm_detect_monitor_audio(edid);
 		ret = drm_add_edid_modes(connector, edid);
-		if (ret)
-			drm_connector_update_edid_property(connector,
+		if (ret) {
+			drm_mode_connector_update_edid_property(connector,
 								edid);
+			drm_edid_to_eld(connector, edid);
+		}
 	}
 	mutex_unlock(&dp->lock);
 
@@ -384,6 +396,11 @@ static int cdn_dp_enable_phy(struct cdn_dp_device *dp, struct cdn_dp_port *port)
 	union extcon_property_value property;
 	int ret;
 
+	ret = cdn_dp_grf_write(dp, GRF_SOC_CON26,
+			       (port->id << UPHY_SEL_BIT) | UPHY_SEL_MASK);
+	if (ret)
+		return ret;
+
 	if (!port->phy_enabled) {
 		ret = phy_power_on(port->phy);
 		if (ret) {
@@ -478,8 +495,8 @@ static int cdn_dp_disable(struct cdn_dp_device *dp)
 	cdn_dp_set_firmware_active(dp, false);
 	cdn_dp_clk_disable(dp);
 	dp->active = false;
-	dp->max_lanes = 0;
-	dp->max_rate = 0;
+	dp->link.rate = 0;
+	dp->link.num_lanes = 0;
 	if (!dp->connected) {
 		kfree(dp->edid);
 		dp->edid = NULL;
@@ -571,7 +588,7 @@ static bool cdn_dp_check_link_status(struct cdn_dp_device *dp)
 	struct cdn_dp_port *port = cdn_dp_connected_port(dp);
 	u8 sink_lanes = drm_dp_max_lane_count(dp->dpcd);
 
-	if (!port || !dp->max_rate || !dp->max_lanes)
+	if (!port || !dp->link.rate || !dp->link.num_lanes)
 		return false;
 
 	if (cdn_dp_dpcd_read(dp, DP_LANE0_1_STATUS, link_status,
@@ -688,6 +705,10 @@ static const struct drm_encoder_helper_funcs cdn_dp_encoder_helper_funcs = {
 	.enable = cdn_dp_encoder_enable,
 	.disable = cdn_dp_encoder_disable,
 	.atomic_check = cdn_dp_encoder_atomic_check,
+};
+
+static const struct drm_encoder_funcs cdn_dp_encoder_funcs = {
+	.destroy = drm_encoder_cleanup,
 };
 
 static int cdn_dp_parse_dt(struct cdn_dp_device *dp)
@@ -817,8 +838,8 @@ out:
 	mutex_unlock(&dp->lock);
 }
 
-static int cdn_dp_audio_mute_stream(struct device *dev, void *data,
-				    bool enable, int direction)
+static int cdn_dp_audio_digital_mute(struct device *dev, void *data,
+				     bool enable)
 {
 	struct cdn_dp_device *dp = dev_get_drvdata(dev);
 	int ret;
@@ -849,9 +870,8 @@ static int cdn_dp_audio_get_eld(struct device *dev, void *data,
 static const struct hdmi_codec_ops audio_codec_ops = {
 	.hw_params = cdn_dp_audio_hw_params,
 	.audio_shutdown = cdn_dp_audio_shutdown,
-	.mute_stream = cdn_dp_audio_mute_stream,
+	.digital_mute = cdn_dp_audio_digital_mute,
 	.get_eld = cdn_dp_audio_get_eld,
-	.no_capture_mute = 1,
 };
 
 static int cdn_dp_audio_codec_init(struct cdn_dp_device *dp,
@@ -950,8 +970,8 @@ static void cdn_dp_pd_event_work(struct work_struct *work)
 
 	/* Enabled and connected with a sink, re-train if requested */
 	} else if (!cdn_dp_check_link_status(dp)) {
-		unsigned int rate = dp->max_rate;
-		unsigned int lanes = dp->max_lanes;
+		unsigned int rate = dp->link.rate;
+		unsigned int lanes = dp->link.num_lanes;
 		struct drm_display_mode *mode = &dp->mode;
 
 		DRM_DEV_INFO(dp->dev, "Connected with sink. Re-train link\n");
@@ -964,7 +984,7 @@ static void cdn_dp_pd_event_work(struct work_struct *work)
 
 		/* If training result is changed, update the video config */
 		if (mode->clock &&
-		    (rate != dp->max_rate || lanes != dp->max_lanes)) {
+		    (rate != dp->link.rate || lanes != dp->link.num_lanes)) {
 			ret = cdn_dp_config_video(dp);
 			if (ret) {
 				dp->connected = false;
@@ -1028,8 +1048,8 @@ static int cdn_dp_bind(struct device *dev, struct device *master, void *data)
 							     dev->of_node);
 	DRM_DEBUG_KMS("possible_crtcs = 0x%x\n", encoder->possible_crtcs);
 
-	ret = drm_simple_encoder_init(drm_dev, encoder,
-				      DRM_MODE_ENCODER_TMDS);
+	ret = drm_encoder_init(drm_dev, encoder, &cdn_dp_encoder_funcs,
+			       DRM_MODE_ENCODER_TMDS, NULL);
 	if (ret) {
 		DRM_ERROR("failed to initialize encoder with drm\n");
 		return ret;
@@ -1051,7 +1071,7 @@ static int cdn_dp_bind(struct device *dev, struct device *master, void *data)
 
 	drm_connector_helper_add(connector, &cdn_dp_connector_helper_funcs);
 
-	ret = drm_connector_attach_encoder(connector, encoder);
+	ret = drm_mode_connector_attach_encoder(connector, encoder);
 	if (ret) {
 		DRM_ERROR("failed to attach connector and encoder\n");
 		goto err_free_connector;
@@ -1107,7 +1127,7 @@ static const struct component_ops cdn_dp_component_ops = {
 	.unbind = cdn_dp_unbind,
 };
 
-static int cdn_dp_suspend(struct device *dev)
+int cdn_dp_suspend(struct device *dev)
 {
 	struct cdn_dp_device *dp = dev_get_drvdata(dev);
 	int ret = 0;
@@ -1121,7 +1141,7 @@ static int cdn_dp_suspend(struct device *dev)
 	return ret;
 }
 
-static int cdn_dp_resume(struct device *dev)
+int cdn_dp_resume(struct device *dev)
 {
 	struct cdn_dp_device *dp = dev_get_drvdata(dev);
 

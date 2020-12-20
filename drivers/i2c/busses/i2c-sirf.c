@@ -1,8 +1,9 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * I2C bus driver for CSR SiRFprimaII
  *
  * Copyright (c) 2011 Cambridge Silicon Radio Limited, a CSR plc group company.
+ *
+ * Licensed under GPLv2 or later.
  */
 
 #include <linux/interrupt.h>
@@ -62,6 +63,7 @@
 #define SIRFSOC_I2C_STOP		BIT(6)
 #define SIRFSOC_I2C_START		BIT(7)
 
+#define SIRFSOC_I2C_DEFAULT_SPEED 100000
 #define SIRFSOC_I2C_ERR_NOACK      1
 #define SIRFSOC_I2C_ERR_TIMEOUT    2
 
@@ -271,6 +273,7 @@ static int i2c_sirfsoc_probe(struct platform_device *pdev)
 {
 	struct sirfsoc_i2c *siic;
 	struct i2c_adapter *adap;
+	struct resource *mem_res;
 	struct clk *clk;
 	int bitrate;
 	int ctrl_speed;
@@ -308,7 +311,8 @@ static int i2c_sirfsoc_probe(struct platform_device *pdev)
 	adap = &siic->adapter;
 	adap->class = I2C_CLASS_DEPRECATED;
 
-	siic->base = devm_platform_ioremap_resource(pdev, 0);
+	mem_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	siic->base = devm_ioremap_resource(&pdev->dev, mem_res);
 	if (IS_ERR(siic->base)) {
 		err = PTR_ERR(siic->base);
 		goto out;
@@ -337,7 +341,7 @@ static int i2c_sirfsoc_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, adap);
 	init_completion(&siic->done);
 
-	/* Controller initialisation */
+	/* Controller Initalisation */
 
 	writel(SIRFSOC_I2C_RESET, siic->base + SIRFSOC_I2C_CTRL);
 	while (readl(siic->base + SIRFSOC_I2C_CTRL) & SIRFSOC_I2C_RESET)
@@ -350,7 +354,7 @@ static int i2c_sirfsoc_probe(struct platform_device *pdev)
 	err = of_property_read_u32(pdev->dev.of_node,
 		"clock-frequency", &bitrate);
 	if (err < 0)
-		bitrate = I2C_MAX_STANDARD_MODE_FREQ;
+		bitrate = SIRFSOC_I2C_DEFAULT_SPEED;
 
 	/*
 	 * Due to some hardware design issues, we need to tune the formula.
@@ -365,7 +369,7 @@ static int i2c_sirfsoc_probe(struct platform_device *pdev)
 	 * but they start to affect the speed when clock is set to faster
 	 * frequencies.
 	 * Through the actual tests, use the different user_div value(which
-	 * in the divider formula 'Fio / (Fi2c * user_div)') to adapt
+	 * in the divider formular 'Fio / (Fi2c * user_div)') to adapt
 	 * the different ranges of i2c bus clock frequency, to make the SCL
 	 * more accurate.
 	 */
@@ -470,6 +474,6 @@ static struct platform_driver i2c_sirfsoc_driver = {
 module_platform_driver(i2c_sirfsoc_driver);
 
 MODULE_DESCRIPTION("SiRF SoC I2C master controller driver");
-MODULE_AUTHOR("Zhiwu Song <Zhiwu.Song@csr.com>");
-MODULE_AUTHOR("Xiangzhen Ye <Xiangzhen.Ye@csr.com>");
+MODULE_AUTHOR("Zhiwu Song <Zhiwu.Song@csr.com>, "
+	"Xiangzhen Ye <Xiangzhen.Ye@csr.com>");
 MODULE_LICENSE("GPL v2");

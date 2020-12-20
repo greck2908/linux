@@ -18,8 +18,6 @@
 #include <asm/cpu_mf.h>
 #include <asm/irq.h>
 
-#include "entry.h"
-
 /* empty control block to disable RI by loading it */
 struct runtime_instr_cb runtime_instr_empty_cb;
 
@@ -57,17 +55,11 @@ static void init_runtime_instr_cb(struct runtime_instr_cb *cb)
 	cb->k = 1;
 	cb->ps = 1;
 	cb->pc = 1;
-	cb->key = PAGE_DEFAULT_KEY >> 4;
+	cb->key = PAGE_DEFAULT_KEY;
 	cb->v = 1;
 }
 
-/*
- * The signum argument is unused. In older kernels it was used to
- * specify a real-time signal. For backwards compatibility user space
- * should pass a valid real-time signal number (the signum argument
- * was checked in older kernels).
- */
-SYSCALL_DEFINE2(s390_runtime_instr, int, command, int, signum)
+SYSCALL_DEFINE1(s390_runtime_instr, int, command)
 {
 	struct runtime_instr_cb *cb;
 

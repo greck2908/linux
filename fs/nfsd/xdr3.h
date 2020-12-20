@@ -14,7 +14,7 @@ struct nfsd3_sattrargs {
 	struct svc_fh		fh;
 	struct iattr		attrs;
 	int			check_guard;
-	time64_t		guardtime;
+	time_t			guardtime;
 };
 
 struct nfsd3_diropargs {
@@ -41,7 +41,7 @@ struct nfsd3_writeargs {
 	__u32			count;
 	int			stable;
 	__u32			len;
-	struct kvec		first;
+	int			vlen;
 };
 
 struct nfsd3_createargs {
@@ -90,7 +90,6 @@ struct nfsd3_symlinkargs {
 	char *			tname;
 	unsigned int		tlen;
 	struct iattr		attrs;
-	struct kvec		first;
 };
 
 struct nfsd3_readdirargs {
@@ -151,7 +150,7 @@ struct nfsd3_readres {
 	__be32			status;
 	struct svc_fh		fh;
 	unsigned long		count;
-	__u32			eof;
+	int			eof;
 };
 
 struct nfsd3_writeres {
@@ -159,7 +158,6 @@ struct nfsd3_writeres {
 	struct svc_fh		fh;
 	unsigned long		count;
 	int			committed;
-	__be32			verf[2];
 };
 
 struct nfsd3_renameres {
@@ -224,7 +222,6 @@ struct nfsd3_pathconfres {
 struct nfsd3_commitres {
 	__be32			status;
 	struct svc_fh		fh;
-	__be32			verf[2];
 };
 
 struct nfsd3_getaclres {
@@ -289,6 +286,7 @@ int nfs3svc_decode_symlinkargs(struct svc_rqst *, __be32 *);
 int nfs3svc_decode_readdirargs(struct svc_rqst *, __be32 *);
 int nfs3svc_decode_readdirplusargs(struct svc_rqst *, __be32 *);
 int nfs3svc_decode_commitargs(struct svc_rqst *, __be32 *);
+int nfs3svc_encode_voidres(struct svc_rqst *, __be32 *);
 int nfs3svc_encode_attrstat(struct svc_rqst *, __be32 *);
 int nfs3svc_encode_wccstat(struct svc_rqst *, __be32 *);
 int nfs3svc_encode_diropres(struct svc_rqst *, __be32 *);

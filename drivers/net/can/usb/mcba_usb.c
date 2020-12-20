@@ -1,7 +1,18 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /* SocketCAN driver for Microchip CAN BUS Analyzer Tool
  *
  * Copyright (C) 2017 Mobica Limited
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published
+ * by the Free Software Foundation; version 2 of the License.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along
+ * with this program.
  *
  * This driver is inspired by the 4.6.2 version of net/can/usb/usb_8dev.c
  */
@@ -28,7 +39,7 @@
 #define MCBA_CTX_FREE MCBA_MAX_TX_URBS
 
 /* RX buffer must be bigger than msg size since at the
- * beginning USB messages are stacked.
+ * beggining USB messages are stacked.
  */
 #define MCBA_USB_RX_BUFF_SIZE 64
 #define MCBA_USB_TX_BUFF_SIZE (sizeof(struct mcba_usb_msg))
@@ -184,7 +195,7 @@ static inline struct mcba_usb_ctx *mcba_usb_get_free_ctx(struct mcba_priv *priv,
 
 			if (cf) {
 				ctx->can = true;
-				ctx->dlc = cf->len;
+				ctx->dlc = cf->can_dlc;
 			} else {
 				ctx->can = false;
 				ctx->dlc = 0;
@@ -326,6 +337,8 @@ static netdev_tx_t mcba_usb_start_xmit(struct sk_buff *skb,
 	if (!ctx)
 		return NETDEV_TX_BUSY;
 
+	can_put_echo_skb(skb, priv->netdev, ctx->ndx);
+
 	if (cf->can_id & CAN_EFF_FLAG) {
 		/* SIDH    | SIDL                 | EIDH   | EIDL
 		 * 28 - 21 | 20 19 18 x x x 17 16 | 15 - 8 | 7 - 0
@@ -348,14 +361,12 @@ static netdev_tx_t mcba_usb_start_xmit(struct sk_buff *skb,
 		usb_msg.eid = 0;
 	}
 
-	usb_msg.dlc = cf->len;
+	usb_msg.dlc = cf->can_dlc;
 
 	memcpy(usb_msg.data, cf->data, usb_msg.dlc);
 
 	if (cf->can_id & CAN_RTR_FLAG)
 		usb_msg.dlc |= MCBA_DLC_RTR_MASK;
-
-	can_put_echo_skb(skb, priv->netdev, ctx->ndx);
 
 	err = mcba_usb_xmit(priv, (struct mcba_usb_msg *)&usb_msg, ctx);
 	if (err)
@@ -451,12 +462,12 @@ static void mcba_usb_process_can(struct mcba_priv *priv,
 	if (msg->dlc & MCBA_DLC_RTR_MASK)
 		cf->can_id |= CAN_RTR_FLAG;
 
-	cf->len = can_cc_dlc2len(msg->dlc & MCBA_DLC_MASK);
+	cf->can_dlc = get_can_dlc(msg->dlc & MCBA_DLC_MASK);
 
-	memcpy(cf->data, msg->data, cf->len);
+	memcpy(cf->data, msg->data, cf->can_dlc);
 
 	stats->rx_packets++;
-	stats->rx_bytes += cf->len;
+	stats->rx_bytes += cf->can_dlc;
 
 	can_led_event(priv->netdev, CAN_LED_EVENT_RX);
 	netif_rx(skb);
@@ -793,7 +804,7 @@ static int mcba_usb_probe(struct usb_interface *intf,
 {
 	struct net_device *netdev;
 	struct mcba_priv *priv;
-	int err;
+	int err = -ENOMEM;
 	struct usb_device *usbdev = interface_to_usbdev(intf);
 
 	netdev = alloc_candev(sizeof(struct mcba_priv), MCBA_MAX_TX_URBS);
@@ -876,8 +887,9 @@ static void mcba_usb_disconnect(struct usb_interface *intf)
 	netdev_info(priv->netdev, "device disconnected\n");
 
 	unregister_candev(priv->netdev);
-	mcba_urb_unlink(priv);
 	free_candev(priv->netdev);
+
+	mcba_urb_unlink(priv);
 }
 
 static struct usb_driver mcba_usb_driver = {

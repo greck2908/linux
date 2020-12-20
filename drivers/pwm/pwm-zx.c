@@ -1,7 +1,10 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2017 Sanechips Technology Co., Ltd.
  * Copyright 2017 Linaro Ltd.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 
 #include <linux/clk.h>
@@ -148,7 +151,7 @@ static int zx_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 }
 
 static int zx_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
-			const struct pwm_state *state)
+			struct pwm_state *state)
 {
 	struct zx_pwm_chip *zpc = to_zx_pwm_chip(chip);
 	struct pwm_state cstate;
@@ -196,6 +199,7 @@ static const struct pwm_ops zx_pwm_ops = {
 static int zx_pwm_probe(struct platform_device *pdev)
 {
 	struct zx_pwm_chip *zpc;
+	struct resource *res;
 	unsigned int i;
 	int ret;
 
@@ -203,7 +207,8 @@ static int zx_pwm_probe(struct platform_device *pdev)
 	if (!zpc)
 		return -ENOMEM;
 
-	zpc->base = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	zpc->base = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(zpc->base))
 		return PTR_ERR(zpc->base);
 
@@ -236,7 +241,6 @@ static int zx_pwm_probe(struct platform_device *pdev)
 	ret = pwmchip_add(&zpc->chip);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "failed to add PWM chip: %d\n", ret);
-		clk_disable_unprepare(zpc->pclk);
 		return ret;
 	}
 

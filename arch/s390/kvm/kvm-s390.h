@@ -2,7 +2,7 @@
 /*
  * definition for kvm on s390
  *
- * Copyright IBM Corp. 2008, 2020
+ * Copyright IBM Corp. 2008, 2009
  *
  *    Author(s): Carsten Otte <cotte@de.ibm.com>
  *               Christian Borntraeger <borntraeger@de.ibm.com>
@@ -15,10 +15,11 @@
 #include <linux/hrtimer.h>
 #include <linux/kvm.h>
 #include <linux/kvm_host.h>
-#include <linux/lockdep.h>
 #include <asm/facility.h>
 #include <asm/processor.h>
 #include <asm/sclp.h>
+
+typedef int (*intercept_handler_t)(struct kvm_vcpu *vcpu);
 
 /* Transactional Memory Execution related macros */
 #define IS_TE_ENABLED(vcpu)	((vcpu->arch.sie_block->ecb & ECB_TE))
@@ -26,17 +27,6 @@
 #define IS_ITDB_VALID(vcpu)	((*(char *)vcpu->arch.sie_block->itdba == TDB_FORMAT1))
 
 extern debug_info_t *kvm_s390_dbf;
-extern debug_info_t *kvm_s390_dbf_uv;
-
-#define KVM_UV_EVENT(d_kvm, d_loglevel, d_string, d_args...)\
-do { \
-	debug_sprintf_event((d_kvm)->arch.dbf, d_loglevel, d_string "\n", \
-	  d_args); \
-	debug_sprintf_event(kvm_s390_dbf_uv, d_loglevel, \
-			    "%d: " d_string "\n", (d_kvm)->userspace_pid, \
-			    d_args); \
-} while (0)
-
 #define KVM_EVENT(d_loglevel, d_string, d_args...)\
 do { \
 	debug_sprintf_event(kvm_s390_dbf, d_loglevel, d_string "\n", \
@@ -57,29 +47,14 @@ do { \
 	  d_args); \
 } while (0)
 
-static inline void kvm_s390_set_cpuflags(struct kvm_vcpu *vcpu, u32 flags)
-{
-	atomic_or(flags, &vcpu->arch.sie_block->cpuflags);
-}
-
-static inline void kvm_s390_clear_cpuflags(struct kvm_vcpu *vcpu, u32 flags)
-{
-	atomic_andnot(flags, &vcpu->arch.sie_block->cpuflags);
-}
-
-static inline bool kvm_s390_test_cpuflags(struct kvm_vcpu *vcpu, u32 flags)
-{
-	return (atomic_read(&vcpu->arch.sie_block->cpuflags) & flags) == flags;
-}
-
 static inline int is_vcpu_stopped(struct kvm_vcpu *vcpu)
 {
-	return kvm_s390_test_cpuflags(vcpu, CPUSTAT_STOPPED);
+	return atomic_read(&vcpu->arch.sie_block->cpuflags) & CPUSTAT_STOPPED;
 }
 
 static inline int is_vcpu_idle(struct kvm_vcpu *vcpu)
 {
-	return test_bit(vcpu->vcpu_id, vcpu->kvm->arch.idle_mask);
+	return test_bit(vcpu->vcpu_id, vcpu->arch.local_int.float_int->idle_mask);
 }
 
 static inline int kvm_is_ucontrol(struct kvm *kvm)
@@ -208,39 +183,6 @@ static inline int kvm_s390_user_cpu_state_ctrl(struct kvm *kvm)
 	return kvm->arch.user_cpu_state_ctrl != 0;
 }
 
-/* implemented in pv.c */
-int kvm_s390_pv_destroy_cpu(struct kvm_vcpu *vcpu, u16 *rc, u16 *rrc);
-int kvm_s390_pv_create_cpu(struct kvm_vcpu *vcpu, u16 *rc, u16 *rrc);
-int kvm_s390_pv_deinit_vm(struct kvm *kvm, u16 *rc, u16 *rrc);
-int kvm_s390_pv_init_vm(struct kvm *kvm, u16 *rc, u16 *rrc);
-int kvm_s390_pv_set_sec_parms(struct kvm *kvm, void *hdr, u64 length, u16 *rc,
-			      u16 *rrc);
-int kvm_s390_pv_unpack(struct kvm *kvm, unsigned long addr, unsigned long size,
-		       unsigned long tweak, u16 *rc, u16 *rrc);
-int kvm_s390_pv_set_cpu_state(struct kvm_vcpu *vcpu, u8 state);
-
-static inline u64 kvm_s390_pv_get_handle(struct kvm *kvm)
-{
-	return kvm->arch.pv.handle;
-}
-
-static inline u64 kvm_s390_pv_cpu_get_handle(struct kvm_vcpu *vcpu)
-{
-	return vcpu->arch.pv.handle;
-}
-
-static inline bool kvm_s390_pv_is_protected(struct kvm *kvm)
-{
-	lockdep_assert_held(&kvm->lock);
-	return !!kvm_s390_pv_get_handle(kvm);
-}
-
-static inline bool kvm_s390_pv_cpu_is_protected(struct kvm_vcpu *vcpu)
-{
-	lockdep_assert_held(&vcpu->mutex);
-	return !!kvm_s390_pv_cpu_get_handle(vcpu);
-}
-
 /* implemented in interrupt.c */
 int kvm_s390_handle_wait(struct kvm_vcpu *vcpu);
 void kvm_s390_vcpu_wakeup(struct kvm_vcpu *vcpu);
@@ -326,20 +268,22 @@ int kvm_s390_handle_sigp(struct kvm_vcpu *vcpu);
 int kvm_s390_handle_sigp_pei(struct kvm_vcpu *vcpu);
 
 /* implemented in kvm-s390.c */
-void kvm_s390_set_tod_clock(struct kvm *kvm,
-			    const struct kvm_s390_vm_tod_clock *gtod);
+void kvm_s390_set_tod_clock_ext(struct kvm *kvm,
+				 const struct kvm_s390_vm_tod_clock *gtod);
+void kvm_s390_set_tod_clock(struct kvm *kvm, u64 tod);
 long kvm_arch_fault_in_page(struct kvm_vcpu *vcpu, gpa_t gpa, int writable);
 int kvm_s390_store_status_unloaded(struct kvm_vcpu *vcpu, unsigned long addr);
 int kvm_s390_vcpu_store_status(struct kvm_vcpu *vcpu, unsigned long addr);
-int kvm_s390_vcpu_start(struct kvm_vcpu *vcpu);
-int kvm_s390_vcpu_stop(struct kvm_vcpu *vcpu);
+void kvm_s390_vcpu_start(struct kvm_vcpu *vcpu);
+void kvm_s390_vcpu_stop(struct kvm_vcpu *vcpu);
 void kvm_s390_vcpu_block(struct kvm_vcpu *vcpu);
 void kvm_s390_vcpu_unblock(struct kvm_vcpu *vcpu);
-bool kvm_s390_vcpu_sie_inhibited(struct kvm_vcpu *vcpu);
 void exit_sie(struct kvm_vcpu *vcpu);
 void kvm_s390_sync_request(int req, struct kvm_vcpu *vcpu);
 int kvm_s390_vcpu_setup_cmma(struct kvm_vcpu *vcpu);
 void kvm_s390_vcpu_unsetup_cmma(struct kvm_vcpu *vcpu);
+unsigned long kvm_s390_fac_list_mask_size(void);
+extern unsigned long kvm_s390_fac_list_mask[];
 void kvm_s390_set_cpu_timer(struct kvm_vcpu *vcpu, __u64 cputm);
 __u64 kvm_s390_get_cpu_timer(struct kvm_vcpu *vcpu);
 
@@ -423,11 +367,6 @@ int kvm_s390_set_irq_state(struct kvm_vcpu *vcpu,
 			   void __user *buf, int len);
 int kvm_s390_get_irq_state(struct kvm_vcpu *vcpu,
 			   __u8 __user *buf, int len);
-void kvm_s390_gisa_init(struct kvm *kvm);
-void kvm_s390_gisa_clear(struct kvm *kvm);
-void kvm_s390_gisa_destroy(struct kvm *kvm);
-int kvm_s390_gib_init(u8 nisc);
-void kvm_s390_gib_destroy(void);
 
 /* implemented in guestdbg.c */
 void kvm_s390_backup_guest_per_regs(struct kvm_vcpu *vcpu);
@@ -458,17 +397,4 @@ static inline int kvm_s390_use_sca_entries(void)
 }
 void kvm_s390_reinject_machine_check(struct kvm_vcpu *vcpu,
 				     struct mcck_volatile_info *mcck_info);
-
-/**
- * kvm_s390_vcpu_crypto_reset_all
- *
- * Reset the crypto attributes for each vcpu. This can be done while the vcpus
- * are running as each vcpu will be removed from SIE before resetting the crypt
- * attributes and restored to SIE afterward.
- *
- * Note: The kvm->lock must be held while calling this function
- *
- * @kvm: the KVM guest
- */
-void kvm_s390_vcpu_crypto_reset_all(struct kvm *kvm);
 #endif

@@ -1,7 +1,16 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+
 /******************************************************************************
  *
  * Copyright(c) 2007 - 2011 Realtek Corporation. All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+ * more details.
  *
  ******************************************************************************/
 
@@ -42,6 +51,7 @@
 #define RTL8188E_TRANS_ACT_TO_LPS_STEPS		15
 #define RTL8188E_TRANS_LPS_TO_ACT_STEPS		15
 #define RTL8188E_TRANS_END_STEPS		1
+
 
 #define RTL8188E_TRANS_CARDEMU_TO_ACT					\
 	/* format
@@ -178,6 +188,7 @@
 	{0x0553, PWR_CUT_ALL_MSK, PWR_CMD_WRITE, BIT(5), BIT(5)}, \
 	/*Respond TxOK to scheduler*/
 
+
 #define RTL8188E_TRANS_LPS_TO_ACT					\
 	/* format
 	 * { offset, cut_msk, cmd, msk,
@@ -210,6 +221,7 @@
 	 * comments here
 	 */								\
 	{0xFFFF, PWR_CUT_ALL_MSK, PWR_CMD_END, 0, 0},
+
 
 extern struct wl_pwr_cfg rtl8188E_power_on_flow
 		[RTL8188E_TRANS_CARDEMU_TO_ACT_STEPS + RTL8188E_TRANS_END_STEPS];

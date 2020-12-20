@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * INET		An implementation of the TCP/IP protocol suite for the LINUX
  *		operating system.  INET is implemented using the  BSD Socket
@@ -8,6 +7,11 @@
  *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *		Thomas Graf <tgraf@suug.ch>
+ *
+ *		This program is free software; you can redistribute it and/or
+ *		modify it under the terms of the GNU General Public License
+ *		as published by the Free Software Foundation; either version
+ *		2 of the License, or (at your option) any later version.
  *
  * Fixes:
  *		Rani Assaf	:	local_rule cannot be deleted
@@ -27,9 +31,7 @@
 #include <net/route.h>
 #include <net/tcp.h>
 #include <net/ip_fib.h>
-#include <net/nexthop.h>
 #include <net/fib_rules.h>
-#include <linux/indirect_call_wrapper.h>
 
 struct fib4_rule {
 	struct fib_rule		common;
@@ -66,10 +68,9 @@ bool fib4_rule_default(const struct fib_rule *rule)
 }
 EXPORT_SYMBOL_GPL(fib4_rule_default);
 
-int fib4_rules_dump(struct net *net, struct notifier_block *nb,
-		    struct netlink_ext_ack *extack)
+int fib4_rules_dump(struct net *net, struct notifier_block *nb)
 {
-	return fib_rules_dump(net, nb, AF_INET, extack);
+	return fib_rules_dump(net, nb, AF_INET);
 }
 
 unsigned int fib4_rules_seq_read(struct net *net)
@@ -104,9 +105,8 @@ int __fib_lookup(struct net *net, struct flowi4 *flp,
 }
 EXPORT_SYMBOL_GPL(__fib_lookup);
 
-INDIRECT_CALLABLE_SCOPE int fib4_rule_action(struct fib_rule *rule,
-					     struct flowi *flp, int flags,
-					     struct fib_lookup_arg *arg)
+static int fib4_rule_action(struct fib_rule *rule, struct flowi *flp,
+			    int flags, struct fib_lookup_arg *arg)
 {
 	int err = -EAGAIN;
 	struct fib_table *tbl;
@@ -140,17 +140,13 @@ INDIRECT_CALLABLE_SCOPE int fib4_rule_action(struct fib_rule *rule,
 	return err;
 }
 
-INDIRECT_CALLABLE_SCOPE bool fib4_rule_suppress(struct fib_rule *rule,
-						struct fib_lookup_arg *arg)
+static bool fib4_rule_suppress(struct fib_rule *rule, struct fib_lookup_arg *arg)
 {
 	struct fib_result *result = (struct fib_result *) arg->result;
 	struct net_device *dev = NULL;
 
-	if (result->fi) {
-		struct fib_nh_common *nhc = fib_info_nhc(result->fi, 0);
-
-		dev = nhc->nhc_dev;
-	}
+	if (result->fi)
+		dev = result->fi->fib_dev;
 
 	/* do not accept result if the route does
 	 * not meet the required prefix length
@@ -172,8 +168,7 @@ suppress_route:
 	return true;
 }
 
-INDIRECT_CALLABLE_SCOPE int fib4_rule_match(struct fib_rule *rule,
-					    struct flowi *fl, int flags)
+static int fib4_rule_match(struct fib_rule *rule, struct flowi *fl, int flags)
 {
 	struct fib4_rule *r = (struct fib4_rule *) rule;
 	struct flowi4 *fl4 = &fl->u.ip4;
@@ -187,31 +182,16 @@ INDIRECT_CALLABLE_SCOPE int fib4_rule_match(struct fib_rule *rule,
 	if (r->tos && (r->tos != fl4->flowi4_tos))
 		return 0;
 
-	if (rule->ip_proto && (rule->ip_proto != fl4->flowi4_proto))
-		return 0;
-
-	if (fib_rule_port_range_set(&rule->sport_range) &&
-	    !fib_rule_port_inrange(&rule->sport_range, fl4->fl4_sport))
-		return 0;
-
-	if (fib_rule_port_range_set(&rule->dport_range) &&
-	    !fib_rule_port_inrange(&rule->dport_range, fl4->fl4_dport))
-		return 0;
-
 	return 1;
 }
 
 static struct fib_table *fib_empty_table(struct net *net)
 {
-	u32 id = 1;
+	u32 id;
 
-	while (1) {
+	for (id = 1; id <= RT_TABLE_MAX; id++)
 		if (!fib_get_table(net, id))
 			return fib_new_table(net, id);
-
-		if (id++ == RT_TABLE_MAX)
-			break;
-	}
 	return NULL;
 }
 
@@ -222,17 +202,14 @@ static const struct nla_policy fib4_rule_policy[FRA_MAX+1] = {
 
 static int fib4_rule_configure(struct fib_rule *rule, struct sk_buff *skb,
 			       struct fib_rule_hdr *frh,
-			       struct nlattr **tb,
-			       struct netlink_ext_ack *extack)
+			       struct nlattr **tb)
 {
 	struct net *net = sock_net(skb->sk);
 	int err = -EINVAL;
 	struct fib4_rule *rule4 = (struct fib4_rule *) rule;
 
-	if (frh->tos & ~IPTOS_TOS_MASK) {
-		NL_SET_ERR_MSG(extack, "Invalid tos");
+	if (frh->tos & ~IPTOS_TOS_MASK)
 		goto errout;
-	}
 
 	/* split local/main if they are not already split */
 	err = fib_unmerge(net);
@@ -267,9 +244,6 @@ static int fib4_rule_configure(struct fib_rule *rule, struct sk_buff *skb,
 	}
 #endif
 
-	if (fib_rule_requires_fldissect(rule))
-		net->ipv4.fib_rules_require_fldissect++;
-
 	rule4->src_len = frh->src_len;
 	rule4->srcmask = inet_make_mask(rule4->src_len);
 	rule4->dst_len = frh->dst_len;
@@ -298,10 +272,6 @@ static int fib4_rule_delete(struct fib_rule *rule)
 		net->ipv4.fib_num_tclassid_users--;
 #endif
 	net->ipv4.fib_has_custom_rules = true;
-
-	if (net->ipv4.fib_rules_require_fldissect &&
-	    fib_rule_requires_fldissect(rule))
-		net->ipv4.fib_rules_require_fldissect--;
 errout:
 	return err;
 }
@@ -419,7 +389,6 @@ int __net_init fib4_rules_init(struct net *net)
 		goto fail;
 	net->ipv4.rules_ops = ops;
 	net->ipv4.fib_has_custom_rules = false;
-	net->ipv4.fib_rules_require_fldissect = 0;
 	return 0;
 
 fail:

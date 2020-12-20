@@ -1,6 +1,9 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2017 Pengutronix, Oleksij Rempel <kernel@pengutronix.de>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2
+ * as published by the Free Software Foundation.
  */
 
 #include <linux/clk.h>
@@ -165,7 +168,7 @@ static int imx_rproc_start(struct rproc *rproc)
 	ret = regmap_update_bits(priv->regmap, dcfg->src_reg,
 				 dcfg->src_mask, dcfg->src_start);
 	if (ret)
-		dev_err(dev, "Failed to enable M4!\n");
+		dev_err(dev, "Filed to enable M4!\n");
 
 	return ret;
 }
@@ -180,13 +183,13 @@ static int imx_rproc_stop(struct rproc *rproc)
 	ret = regmap_update_bits(priv->regmap, dcfg->src_reg,
 				 dcfg->src_mask, dcfg->src_stop);
 	if (ret)
-		dev_err(dev, "Failed to stop M4!\n");
+		dev_err(dev, "Filed to stop M4!\n");
 
 	return ret;
 }
 
 static int imx_rproc_da_to_sys(struct imx_rproc *priv, u64 da,
-			       size_t len, u64 *sys)
+			       int len, u64 *sys)
 {
 	const struct imx_rproc_dcfg *dcfg = priv->dcfg;
 	int i;
@@ -203,19 +206,19 @@ static int imx_rproc_da_to_sys(struct imx_rproc *priv, u64 da,
 		}
 	}
 
-	dev_warn(priv->dev, "Translation failed: da = 0x%llx len = 0x%zx\n",
+	dev_warn(priv->dev, "Translation filed: da = 0x%llx len = 0x%x\n",
 		 da, len);
 	return -ENOENT;
 }
 
-static void *imx_rproc_da_to_va(struct rproc *rproc, u64 da, size_t len)
+static void *imx_rproc_da_to_va(struct rproc *rproc, u64 da, int len)
 {
 	struct imx_rproc *priv = rproc->priv;
 	void *va = NULL;
 	u64 sys;
 	int i;
 
-	if (len == 0)
+	if (len <= 0)
 		return NULL;
 
 	/*
@@ -235,8 +238,7 @@ static void *imx_rproc_da_to_va(struct rproc *rproc, u64 da, size_t len)
 		}
 	}
 
-	dev_dbg(&rproc->dev, "da = 0x%llx len = 0x%zx va = 0x%p\n",
-		da, len, va);
+	dev_dbg(&rproc->dev, "da = 0x%llx len = 0x%x va = 0x%p\n", da, len, va);
 
 	return va;
 }
@@ -331,14 +333,14 @@ static int imx_rproc_probe(struct platform_device *pdev)
 	/* set some other name then imx */
 	rproc = rproc_alloc(dev, "imx-rproc", &imx_rproc_ops,
 			    NULL, sizeof(*priv));
-	if (!rproc)
-		return -ENOMEM;
+	if (!rproc) {
+		ret = -ENOMEM;
+		goto err;
+	}
 
 	dcfg = of_device_get_match_data(dev);
-	if (!dcfg) {
-		ret = -EINVAL;
-		goto err_put_rproc;
-	}
+	if (!dcfg)
+		return -EINVAL;
 
 	priv = rproc->priv;
 	priv->rproc = rproc;
@@ -350,15 +352,15 @@ static int imx_rproc_probe(struct platform_device *pdev)
 
 	ret = imx_rproc_addr_init(priv, pdev);
 	if (ret) {
-		dev_err(dev, "failed on imx_rproc_addr_init\n");
+		dev_err(dev, "filed on imx_rproc_addr_init\n");
 		goto err_put_rproc;
 	}
 
 	priv->clk = devm_clk_get(dev, NULL);
 	if (IS_ERR(priv->clk)) {
 		dev_err(dev, "Failed to get clock\n");
-		ret = PTR_ERR(priv->clk);
-		goto err_put_rproc;
+		rproc_free(rproc);
+		return PTR_ERR(priv->clk);
 	}
 
 	/*
@@ -368,7 +370,8 @@ static int imx_rproc_probe(struct platform_device *pdev)
 	ret = clk_prepare_enable(priv->clk);
 	if (ret) {
 		dev_err(&rproc->dev, "Failed to enable clock\n");
-		goto err_put_rproc;
+		rproc_free(rproc);
+		return ret;
 	}
 
 	ret = rproc_add(rproc);
@@ -377,13 +380,13 @@ static int imx_rproc_probe(struct platform_device *pdev)
 		goto err_put_clk;
 	}
 
-	return 0;
+	return ret;
 
 err_put_clk:
 	clk_disable_unprepare(priv->clk);
 err_put_rproc:
 	rproc_free(rproc);
-
+err:
 	return ret;
 }
 

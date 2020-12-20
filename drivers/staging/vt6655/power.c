@@ -1,7 +1,16 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * Copyright (c) 1996, 2003 VIA Networking Technologies, Inc.
  * All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
  * File: power.c
  *
@@ -48,8 +57,11 @@
  *
  */
 
-void PSvEnablePowerSaving(struct vnt_private *priv,
-			  unsigned short wListenInterval)
+void
+PSvEnablePowerSaving(
+	struct vnt_private *priv,
+	unsigned short wListenInterval
+)
 {
 	u16 wAID = priv->current_aid | BIT(14) | BIT(15);
 
@@ -58,11 +70,14 @@ void PSvEnablePowerSaving(struct vnt_private *priv,
 	if (priv->op_mode != NL80211_IFTYPE_ADHOC) {
 		/* set AID */
 		VNSvOutPortW(priv->PortOffset + MAC_REG_AIDATIM, wAID);
+	} else {
+		/* set ATIM Window */
+#if 0 /* TODO atim window */
+		MACvWriteATIMW(priv->PortOffset, pMgmt->wCurrATIMWindow);
+#endif
 	}
-
 	/* Set AutoSleep */
 	MACvRegBitsOn(priv->PortOffset, MAC_REG_PSCFG, PSCFG_AUTOSLEEP);
-
 	/* Set HWUTSF */
 	MACvRegBitsOn(priv->PortOffset, MAC_REG_TFTCTL, TFTCTL_HWUTSF);
 
@@ -94,17 +109,17 @@ void PSvEnablePowerSaving(struct vnt_private *priv,
  *
  */
 
-void PSvDisablePowerSaving(struct vnt_private *priv)
+void
+PSvDisablePowerSaving(
+	struct vnt_private *priv
+)
 {
 	/* disable power saving hw function */
 	MACbPSWakeup(priv);
-
 	/* clear AutoSleep */
 	MACvRegBitsOff(priv->PortOffset, MAC_REG_PSCFG, PSCFG_AUTOSLEEP);
-
 	/* clear HWUTSF */
 	MACvRegBitsOff(priv->PortOffset, MAC_REG_TFTCTL, TFTCTL_HWUTSF);
-
 	/* set always listen beacon */
 	MACvRegBitsOn(priv->PortOffset, MAC_REG_PSCTL, PSCTL_ALBCN);
 
@@ -123,7 +138,10 @@ void PSvDisablePowerSaving(struct vnt_private *priv)
  *
  */
 
-bool PSbIsNextTBTTWakeUp(struct vnt_private *priv)
+bool
+PSbIsNextTBTTWakeUp(
+	struct vnt_private *priv
+)
 {
 	struct ieee80211_hw *hw = priv->hw;
 	struct ieee80211_conf *conf = &hw->conf;

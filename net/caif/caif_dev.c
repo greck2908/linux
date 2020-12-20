@@ -1,8 +1,8 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * CAIF Interface registration.
  * Copyright (C) ST-Ericsson AB 2010
  * Author:	Sjur Brendeland
+ * License terms: GNU General Public License (GPL) version 2
  *
  * Borrowed heavily from file: pn_dev.c. Thanks to Remi Denis-Courmont
  *  and Sakari Ailus <sakari.ailus@nokia.com>
@@ -112,8 +112,7 @@ static struct caif_device_entry *caif_get(struct net_device *dev)
 	    caif_device_list(dev_net(dev));
 	struct caif_device_entry *caifd;
 
-	list_for_each_entry_rcu(caifd, &caifdevs->list, list,
-				lockdep_rtnl_is_held()) {
+	list_for_each_entry_rcu(caifd, &caifdevs->list, list) {
 		if (caifd->netdev == dev)
 			return caifd;
 	}
@@ -132,17 +131,15 @@ static void caif_flow_cb(struct sk_buff *skb)
 	caifd = caif_get(skb->dev);
 
 	WARN_ON(caifd == NULL);
-	if (!caifd) {
-		rcu_read_unlock();
+	if (caifd == NULL)
 		return;
-	}
 
 	caifd_hold(caifd);
 	rcu_read_unlock();
 
 	spin_lock_bh(&caifd->flow_lock);
 	send_xoff = caifd->xoff;
-	caifd->xoff = false;
+	caifd->xoff = 0;
 	dtor = caifd->xoff_skb_dtor;
 
 	if (WARN_ON(caifd->xoff_skb != skb))
@@ -187,19 +184,15 @@ static int transmit(struct cflayer *layer, struct cfpkt *pkt)
 		goto noxoff;
 
 	if (likely(!netif_queue_stopped(caifd->netdev))) {
-		struct Qdisc *sch;
-
 		/* If we run with a TX queue, check if the queue is too long*/
 		txq = netdev_get_tx_queue(skb->dev, 0);
-		sch = rcu_dereference_bh(txq->qdisc);
-		if (likely(qdisc_is_empty(sch)))
+		qlen = qdisc_qlen(rcu_dereference_bh(txq->qdisc));
+
+		if (likely(qlen == 0))
 			goto noxoff;
 
-		/* can check for explicit qdisc len value only !NOLOCK,
-		 * always set flow off otherwise
-		 */
 		high = (caifd->netdev->tx_queue_len * q_high) / 100;
-		if (!(sch->flags & TCQ_F_NOLOCK) && likely(sch->q.qlen < high))
+		if (likely(qlen < high))
 			goto noxoff;
 	}
 
@@ -220,7 +213,7 @@ static int transmit(struct cflayer *layer, struct cfpkt *pkt)
 	pr_debug("queue has stopped(%d) or is full (%d > %d)\n",
 			netif_queue_stopped(caifd->netdev),
 			qlen, high);
-	caifd->xoff = true;
+	caifd->xoff = 1;
 	caifd->xoff_skb = skb;
 	caifd->xoff_skb_dtor = skb->destructor;
 	skb->destructor = caif_flow_cb;
@@ -407,7 +400,7 @@ static int caif_device_notify(struct notifier_block *me, unsigned long what,
 			break;
 		}
 
-		caifd->xoff = false;
+		caifd->xoff = 0;
 		cfcnfg_set_phy_state(cfg, &caifd->layer, true);
 		rcu_read_unlock();
 
@@ -442,7 +435,7 @@ static int caif_device_notify(struct notifier_block *me, unsigned long what,
 		if (caifd->xoff_skb_dtor != NULL && caifd->xoff_skb != NULL)
 			caifd->xoff_skb->destructor = caifd->xoff_skb_dtor;
 
-		caifd->xoff = false;
+		caifd->xoff = 0;
 		caifd->xoff_skb_dtor = NULL;
 		caifd->xoff_skb = NULL;
 

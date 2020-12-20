@@ -1,11 +1,9 @@
-// SPDX-License-Identifier: GPL-2.0
 /* sunbmac.c: Driver for Sparc BigMAC 100baseT ethernet adapters.
  *
  * Copyright (C) 1997, 1998, 1999, 2003, 2008 David S. Miller (davem@davemloft.net)
  */
 
 #include <linux/module.h>
-#include <linux/pgtable.h>
 
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -35,6 +33,7 @@
 #include <asm/io.h>
 #include <asm/openprom.h>
 #include <asm/oplib.h>
+#include <asm/pgtable.h>
 
 #include "sunbmac.h"
 
@@ -209,13 +208,13 @@ static void bigmac_clean_rings(struct bigmac *bp)
 	}
 }
 
-static void bigmac_init_rings(struct bigmac *bp, bool non_blocking)
+static void bigmac_init_rings(struct bigmac *bp, int from_irq)
 {
 	struct bmac_init_block *bb = bp->bmac_block;
 	int i;
 	gfp_t gfp_flags = GFP_KERNEL;
 
-	if (non_blocking)
+	if (from_irq || in_interrupt())
 		gfp_flags = GFP_ATOMIC;
 
 	bp->rx_new = bp->rx_old = bp->tx_new = bp->tx_old = 0;
@@ -489,7 +488,7 @@ static void bigmac_tcvr_init(struct bigmac *bp)
 	}
 }
 
-static int bigmac_init_hw(struct bigmac *, bool);
+static int bigmac_init_hw(struct bigmac *, int);
 
 static int try_next_permutation(struct bigmac *bp, void __iomem *tregs)
 {
@@ -549,7 +548,7 @@ static void bigmac_timer(struct timer_list *t)
 				if (ret == -1) {
 					printk(KERN_ERR "%s: Link down, cable problem?\n",
 					       bp->dev->name);
-					ret = bigmac_init_hw(bp, true);
+					ret = bigmac_init_hw(bp, 0);
 					if (ret) {
 						printk(KERN_ERR "%s: Error, cannot re-init the "
 						       "BigMAC.\n", bp->dev->name);
@@ -617,7 +616,7 @@ static void bigmac_begin_auto_negotiation(struct bigmac *bp)
 	add_timer(&bp->bigmac_timer);
 }
 
-static int bigmac_init_hw(struct bigmac *bp, bool non_blocking)
+static int bigmac_init_hw(struct bigmac *bp, int from_irq)
 {
 	void __iomem *gregs        = bp->gregs;
 	void __iomem *cregs        = bp->creg;
@@ -635,7 +634,7 @@ static int bigmac_init_hw(struct bigmac *bp, bool non_blocking)
 	qec_init(bp);
 
 	/* Alloc and reset the tx/rx descriptor chains. */
-	bigmac_init_rings(bp, non_blocking);
+	bigmac_init_rings(bp, from_irq);
 
 	/* Initialize the PHY. */
 	bigmac_tcvr_init(bp);
@@ -749,7 +748,7 @@ static void bigmac_is_medium_rare(struct bigmac *bp, u32 qec_status, u32 bmac_st
 	}
 
 	printk(" RESET\n");
-	bigmac_init_hw(bp, true);
+	bigmac_init_hw(bp, 1);
 }
 
 /* BigMAC transmit complete service routines. */
@@ -781,7 +780,7 @@ static void bigmac_tx(struct bigmac *bp)
 
 		DTX(("skb(%p) ", skb));
 		bp->tx_skbs[elem] = NULL;
-		dev_consume_skb_irq(skb);
+		dev_kfree_skb_irq(skb);
 
 		elem = NEXT_TX(elem);
 	}
@@ -921,7 +920,7 @@ static int bigmac_open(struct net_device *dev)
 		return ret;
 	}
 	timer_setup(&bp->bigmac_timer, bigmac_timer, 0);
-	ret = bigmac_init_hw(bp, false);
+	ret = bigmac_init_hw(bp, 0);
 	if (ret)
 		free_irq(dev->irq, bp);
 	return ret;
@@ -941,17 +940,16 @@ static int bigmac_close(struct net_device *dev)
 	return 0;
 }
 
-static void bigmac_tx_timeout(struct net_device *dev, unsigned int txqueue)
+static void bigmac_tx_timeout(struct net_device *dev)
 {
 	struct bigmac *bp = netdev_priv(dev);
 
-	bigmac_init_hw(bp, true);
+	bigmac_init_hw(bp, 0);
 	netif_wake_queue(dev);
 }
 
 /* Put a packet on the wire. */
-static netdev_tx_t
-bigmac_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static int bigmac_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct bigmac *bp = netdev_priv(dev);
 	int len, entry;

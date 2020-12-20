@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * AppArmor security module
  *
@@ -6,6 +5,12 @@
  *
  * Copyright (C) 1998-2008 Novell/SUSE
  * Copyright 2009-2010 Canonical Ltd.
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation, version 2 of the
+ * License.
+ *
  *
  * AppArmor policy is based around profiles, which contain the rules a
  * task is confined by.  Every task in the system has a profile attached
@@ -77,7 +82,7 @@
 
 #include "include/apparmor.h"
 #include "include/capability.h"
-#include "include/cred.h"
+#include "include/context.h"
 #include "include/file.h"
 #include "include/ipc.h"
 #include "include/match.h"
@@ -187,9 +192,9 @@ static void aa_free_data(void *ptr, void *arg)
 {
 	struct aa_data *data = ptr;
 
-	kfree_sensitive(data->data);
-	kfree_sensitive(data->key);
-	kfree_sensitive(data);
+	kzfree(data->data);
+	kzfree(data->key);
+	kzfree(data);
 }
 
 /**
@@ -205,7 +210,6 @@ static void aa_free_data(void *ptr, void *arg)
 void aa_free_profile(struct aa_profile *profile)
 {
 	struct rhashtable *rht;
-	int i;
 
 	AA_DEBUG("%s(%p)\n", __func__, profile);
 
@@ -217,19 +221,13 @@ void aa_free_profile(struct aa_profile *profile)
 	aa_put_profile(rcu_access_pointer(profile->parent));
 
 	aa_put_ns(profile->ns);
-	kfree_sensitive(profile->rename);
+	kzfree(profile->rename);
 
 	aa_free_file_rules(&profile->file);
 	aa_free_cap_rules(&profile->caps);
 	aa_free_rlimit_rules(&profile->rlimits);
 
-	for (i = 0; i < profile->xattr_count; i++)
-		kfree_sensitive(profile->xattrs[i]);
-	kfree_sensitive(profile->xattrs);
-	for (i = 0; i < profile->secmark_count; i++)
-		kfree_sensitive(profile->secmark[i].label);
-	kfree_sensitive(profile->secmark);
-	kfree_sensitive(profile->dirname);
+	kzfree(profile->dirname);
 	aa_put_dfa(profile->xmatch);
 	aa_put_dfa(profile->policy.dfa);
 
@@ -237,14 +235,13 @@ void aa_free_profile(struct aa_profile *profile)
 		rht = profile->data;
 		profile->data = NULL;
 		rhashtable_free_and_destroy(rht, aa_free_data, NULL);
-		kfree_sensitive(rht);
+		kzfree(rht);
 	}
 
-	kfree_sensitive(profile->hash);
+	kzfree(profile->hash);
 	aa_put_loaddata(profile->rawdata);
-	aa_label_destroy(&profile->label);
 
-	kfree_sensitive(profile);
+	kzfree(profile);
 }
 
 /**
@@ -267,7 +264,7 @@ struct aa_profile *aa_alloc_profile(const char *hname, struct aa_proxy *proxy,
 
 	if (!aa_policy_init(&profile->base, NULL, hname, gfp))
 		goto fail;
-	if (!aa_label_init(&profile->label, 1, gfp))
+	if (!aa_label_init(&profile->label, 1))
 		goto fail;
 
 	/* update being set needed by fs interface */
@@ -583,7 +580,7 @@ static int replacement_allowed(struct aa_profile *profile, int noreplace,
 {
 	if (profile) {
 		if (profile->label.flags & FLAG_IMMUTIBLE) {
-			*info = "cannot replace immutable profile";
+			*info = "cannot replace immutible profile";
 			return -EPERM;
 		} else if (noreplace) {
 			*info = "profile already exists";
@@ -848,16 +845,15 @@ static struct aa_profile *update_to_newest_parent(struct aa_profile *new)
  * @udata: serialized data stream  (NOT NULL)
  *
  * unpack and replace a profile on the profile list and uses of that profile
- * by any task creds via invalidating the old version of the profile, which
- * tasks will notice to update their own cred.  If the profile does not exist
- * on the profile list it is added.
+ * by any aa_task_ctx.  If the profile does not exist on the profile list
+ * it is added.
  *
  * Returns: size of data consumed else error code on failure.
  */
 ssize_t aa_replace_profiles(struct aa_ns *policy_ns, struct aa_label *label,
 			    u32 mask, struct aa_loaddata *udata)
 {
-	const char *ns_name = NULL, *info = NULL;
+	const char *ns_name, *info = NULL;
 	struct aa_ns *ns = NULL;
 	struct aa_load_ent *ent, *tmp;
 	struct aa_loaddata *rawdata_ent;
@@ -1007,9 +1003,6 @@ ssize_t aa_replace_profiles(struct aa_ns *policy_ns, struct aa_label *label,
 			audit_policy(label, op, ns_name, ent->new->base.hname,
 				     "same as current profile, skipping",
 				     error);
-			/* break refcount cycle with proxy. */
-			aa_put_proxy(ent->new->label.proxy);
-			ent->new->label.proxy = NULL;
 			goto skip;
 		}
 
@@ -1044,7 +1037,6 @@ ssize_t aa_replace_profiles(struct aa_ns *policy_ns, struct aa_label *label,
 out:
 	aa_put_ns(ns);
 	aa_put_loaddata(udata);
-	kfree(ns_name);
 
 	if (error)
 		return error;
@@ -1088,7 +1080,7 @@ fail:
  * Remove a profile or sub namespace from the current namespace, so that
  * they can not be found anymore and mark them as replaced by unconfined
  *
- * NOTE: removing confinement does not restore rlimits to preconfinement values
+ * NOTE: removing confinement does not restore rlimits to preconfinemnet values
  *
  * Returns: size of data consume else error code if fails
  */
@@ -1126,8 +1118,8 @@ ssize_t aa_remove_profiles(struct aa_ns *policy_ns, struct aa_label *subj,
 	if (!name) {
 		/* remove namespace - can only happen if fqname[0] == ':' */
 		mutex_lock_nested(&ns->parent->lock, ns->level);
-		__aa_bump_ns_revision(ns);
 		__aa_remove_ns(ns);
+		__aa_bump_ns_revision(ns);
 		mutex_unlock(&ns->parent->lock);
 	} else {
 		/* remove profile */
@@ -1139,9 +1131,9 @@ ssize_t aa_remove_profiles(struct aa_ns *policy_ns, struct aa_label *subj,
 			goto fail_ns_lock;
 		}
 		name = profile->base.hname;
-		__aa_bump_ns_revision(ns);
 		__remove_profile(profile);
 		__aa_labelset_update_subtree(ns);
+		__aa_bump_ns_revision(ns);
 		mutex_unlock(&ns->lock);
 	}
 

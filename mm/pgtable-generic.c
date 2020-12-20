@@ -2,15 +2,14 @@
 /*
  *  mm/pgtable-generic.c
  *
- *  Generic pgtable methods declared in linux/pgtable.h
+ *  Generic pgtable methods declared in asm-generic/pgtable.h
  *
  *  Copyright (C) 2010  Linus Torvalds
  */
 
 #include <linux/pagemap.h>
-#include <linux/hugetlb.h>
-#include <linux/pgtable.h>
 #include <asm/tlb.h>
+#include <asm-generic/pgtable.h>
 
 /*
  * If a p?d_bad entry is found while walking page tables, report
@@ -24,27 +23,18 @@ void pgd_clear_bad(pgd_t *pgd)
 	pgd_clear(pgd);
 }
 
-#ifndef __PAGETABLE_P4D_FOLDED
 void p4d_clear_bad(p4d_t *p4d)
 {
 	p4d_ERROR(*p4d);
 	p4d_clear(p4d);
 }
-#endif
 
-#ifndef __PAGETABLE_PUD_FOLDED
 void pud_clear_bad(pud_t *pud)
 {
 	pud_ERROR(*pud);
 	pud_clear(pud);
 }
-#endif
 
-/*
- * Note that the pmd variant below can't be stub'ed out just as for p4d/pud
- * above. pmd folding is special and typically pmd_* macros refer to upper
- * level even when folded
- */
 void pmd_clear_bad(pmd_t *pmd)
 {
 	pmd_ERROR(*pmd);
@@ -53,7 +43,7 @@ void pmd_clear_bad(pmd_t *pmd)
 
 #ifndef __HAVE_ARCH_PTEP_SET_ACCESS_FLAGS
 /*
- * Only sets the access flags (dirty, accessed), as well as write
+ * Only sets the access flags (dirty, accessed), as well as write 
  * permission. Furthermore, we know it always gets set to a "more
  * permissive" setting, which allows most architectures to optimize
  * this. We return whether the PTE actually changed, which in turn
@@ -191,12 +181,12 @@ pgtable_t pgtable_trans_huge_withdraw(struct mm_struct *mm, pmd_t *pmdp)
 #endif
 
 #ifndef __HAVE_ARCH_PMDP_INVALIDATE
-pmd_t pmdp_invalidate(struct vm_area_struct *vma, unsigned long address,
+void pmdp_invalidate(struct vm_area_struct *vma, unsigned long address,
 		     pmd_t *pmdp)
 {
-	pmd_t old = pmdp_establish(vma, address, pmdp, pmd_mkinvalid(*pmdp));
+	pmd_t entry = *pmdp;
+	set_pmd_at(vma->vm_mm, address, pmdp, pmd_mknotpresent(entry));
 	flush_pmd_tlb_range(vma, address, address + HPAGE_PMD_SIZE);
-	return old;
 }
 #endif
 

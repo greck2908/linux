@@ -1,5 +1,4 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-#include <stdlib.h>
 #if defined(__i386__) || defined(__x86_64__)
 #define barrier() asm volatile("" ::: "memory")
 #define virt_mb() __sync_synchronize()
@@ -14,8 +13,8 @@
 } while (0);
 /* Weak barriers should be used. If not - it's a bug */
 # define mb() abort()
-# define dma_rmb() abort()
-# define dma_wmb() abort()
+# define rmb() abort()
+# define wmb() abort()
 #else
 #error Please fill in barrier macros
 #endif

@@ -26,7 +26,7 @@ int selinux_xfrm_state_delete(struct xfrm_state *x);
 int selinux_xfrm_policy_lookup(struct xfrm_sec_ctx *ctx, u32 fl_secid, u8 dir);
 int selinux_xfrm_state_pol_flow_match(struct xfrm_state *x,
 				      struct xfrm_policy *xp,
-				      const struct flowi_common *flic);
+				      const struct flowi *fl);
 
 #ifdef CONFIG_SECURITY_NETWORK_XFRM
 extern atomic_t selinux_xfrm_refcount;
@@ -47,10 +47,10 @@ static inline void selinux_xfrm_notify_policyload(void)
 {
 	struct net *net;
 
-	down_read(&net_rwsem);
+	rtnl_lock();
 	for_each_net(net)
 		rt_genid_bump_all(net);
-	up_read(&net_rwsem);
+	rtnl_unlock();
 }
 #else
 static inline int selinux_xfrm_enabled(void)

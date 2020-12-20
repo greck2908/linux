@@ -148,7 +148,7 @@ static int pxa27x_ohci_select_pmm(struct pxa27x_ohci *pxa_ohci, int mode)
 		uhcrhda |= RH_A_NPS;
 		break;
 	case PMM_GLOBAL_MODE:
-		uhcrhda &= ~(RH_A_NPS | RH_A_PSM);
+		uhcrhda &= ~(RH_A_NPS & RH_A_PSM);
 		break;
 	case PMM_PERPORT_MODE:
 		uhcrhda &= ~(RH_A_NPS);
@@ -410,13 +410,12 @@ static int ohci_pxa_of_init(struct platform_device *pdev)
 
 /**
  * ohci_hcd_pxa27x_probe - initialize pxa27x-based HCDs
- * @pdev:	USB Host controller to probe
- *
- * Context: task context, might sleep
+ * Context: !in_interrupt()
  *
  * Allocates basic resources for this USB host controller, and
  * then invokes the start() method for the HCD associated with it
  * through the hotplug entry's driver_data.
+ *
  */
 static int ohci_hcd_pxa27x_probe(struct platform_device *pdev)
 {
@@ -510,13 +509,13 @@ static int ohci_hcd_pxa27x_probe(struct platform_device *pdev)
 
 /**
  * ohci_hcd_pxa27x_remove - shutdown processing for pxa27x-based HCDs
- * @pdev: USB Host Controller being removed
- *
- * Context: task context, might sleep
+ * @dev: USB Host Controller being removed
+ * Context: !in_interrupt()
  *
  * Reverses the effect of ohci_hcd_pxa27x_probe(), first invoking
  * the HCD's stop() method.  It is always called from a thread
  * context, normally "rmmod", "apmd", or something similar.
+ *
  */
 static int ohci_hcd_pxa27x_remove(struct platform_device *pdev)
 {

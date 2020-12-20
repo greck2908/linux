@@ -91,7 +91,7 @@ int alloc_event_buffer(void)
 		return -EINVAL;
 
 	buffer_pos = 0;
-	event_buffer = vmalloc(array_size(buffer_size, sizeof(unsigned long)));
+	event_buffer = vmalloc(sizeof(unsigned long) * buffer_size);
 	if (!event_buffer)
 		return -ENOMEM;
 
@@ -113,7 +113,7 @@ static int event_buffer_open(struct inode *inode, struct file *file)
 {
 	int err = -EPERM;
 
-	if (!perfmon_capable())
+	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
 	if (test_and_set_bit_lock(0, &buffer_opened))

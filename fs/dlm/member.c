@@ -1,9 +1,11 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /******************************************************************************
 *******************************************************************************
 **
 **  Copyright (C) 2005-2011 Red Hat, Inc.  All rights reserved.
 **
+**  This copyrighted material is made available to anyone wishing to use,
+**  modify, copy, or redistribute it subject to the terms and conditions
+**  of the GNU General Public License v.2.
 **
 *******************************************************************************
 ******************************************************************************/
@@ -270,7 +272,7 @@ int dlm_slots_assign(struct dlm_ls *ls, int *num_slots, int *slots_size,
 
 	log_slots(ls, gen, num, NULL, array, array_size);
 
-	max_slots = (LOWCOMMS_MAX_TX_BUFFER_LEN - sizeof(struct dlm_rcom) -
+	max_slots = (dlm_config.ci_buffer_size - sizeof(struct dlm_rcom) -
 		     sizeof(struct rcom_config)) / sizeof(struct rcom_slot);
 
 	if (num > max_slots) {
@@ -669,7 +671,7 @@ int dlm_ls_stop(struct dlm_ls *ls)
 int dlm_ls_start(struct dlm_ls *ls)
 {
 	struct dlm_recover *rv, *rv_old;
-	struct dlm_config_node *nodes = NULL;
+	struct dlm_config_node *nodes;
 	int error, count;
 
 	rv = kzalloc(sizeof(*rv), GFP_NOFS);
@@ -678,7 +680,7 @@ int dlm_ls_start(struct dlm_ls *ls)
 
 	error = dlm_config_nodes(ls->ls_name, &nodes, &count);
 	if (error < 0)
-		goto fail_rv;
+		goto fail;
 
 	spin_lock(&ls->ls_recover_lock);
 
@@ -710,9 +712,8 @@ int dlm_ls_start(struct dlm_ls *ls)
 	return 0;
 
  fail:
-	kfree(nodes);
- fail_rv:
 	kfree(rv);
+	kfree(nodes);
 	return error;
 }
 

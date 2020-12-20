@@ -13,7 +13,7 @@
 #define KMSG_COMPONENT "cio"
 #define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
-#include <linux/memblock.h>
+#include <linux/bootmem.h>
 #include <linux/device.h>
 #include <linux/init.h>
 #include <linux/list.h>
@@ -1109,14 +1109,18 @@ static ssize_t cmb_enable_store(struct device *dev,
 }
 DEVICE_ATTR_RW(cmb_enable);
 
+int ccw_set_cmf(struct ccw_device *cdev, int enable)
+{
+	return cmbops->set(cdev, enable ? 2 : 0);
+}
+
 /**
  * enable_cmf() - switch on the channel measurement for a specific device
  *  @cdev:	The ccw device to be enabled
  *
- *  Enable channel measurements for @cdev. If this is called on a device
- *  for which channel measurement is already enabled a reset of the
- *  measurement data is triggered.
- *  Returns: %0 for success or a negative error value.
+ *  Returns %0 for success or a negative error value.
+ *  Note: If this is called on a device for which channel measurement is already
+ *	  enabled a reset of the measurement data is triggered.
  *  Context:
  *    non-atomic
  */
@@ -1156,7 +1160,7 @@ out_unlock:
  * __disable_cmf() - switch off the channel measurement for a specific device
  *  @cdev:	The ccw device to be disabled
  *
- *  Returns: %0 for success or a negative error value.
+ *  Returns %0 for success or a negative error value.
  *
  *  Context:
  *    non-atomic, device_lock() held.
@@ -1180,7 +1184,7 @@ int __disable_cmf(struct ccw_device *cdev)
  * disable_cmf() - switch off the channel measurement for a specific device
  *  @cdev:	The ccw device to be disabled
  *
- *  Returns: %0 for success or a negative error value.
+ *  Returns %0 for success or a negative error value.
  *
  *  Context:
  *    non-atomic
@@ -1201,7 +1205,7 @@ int disable_cmf(struct ccw_device *cdev)
  * @cdev:	the channel to be read
  * @index:	the index of the value to be read
  *
- * Returns: The value read or %0 if the value cannot be read.
+ * Returns the value read or %0 if the value cannot be read.
  *
  *  Context:
  *    any
@@ -1216,7 +1220,7 @@ u64 cmf_read(struct ccw_device *cdev, int index)
  * @cdev:	the channel to be read
  * @data:	a pointer to a data block that will be filled
  *
- * Returns: %0 on success, a negative error value otherwise.
+ * Returns %0 on success, a negative error value otherwise.
  *
  *  Context:
  *    any

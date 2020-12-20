@@ -1,6 +1,9 @@
-/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 #ifndef __ASM_ARC_PAGE_H
 #define __ASM_ARC_PAGE_H
@@ -82,25 +85,11 @@ typedef pte_t * pgtable_t;
  */
 #define virt_to_pfn(kaddr)	(__pa(kaddr) >> PAGE_SHIFT)
 
-/*
- * When HIGHMEM is enabled we have holes in the memory map so we need
- * pfn_valid() that takes into account the actual extents of the physical
- * memory
- */
-#ifdef CONFIG_HIGHMEM
-
-extern unsigned long arch_pfn_offset;
-#define ARCH_PFN_OFFSET		arch_pfn_offset
-
-extern int pfn_valid(unsigned long pfn);
-#define pfn_valid		pfn_valid
-
-#else /* CONFIG_HIGHMEM */
-
 #define ARCH_PFN_OFFSET		virt_to_pfn(CONFIG_LINUX_RAM_BASE)
-#define pfn_valid(pfn)		(((pfn) - ARCH_PFN_OFFSET) < max_mapnr)
 
-#endif /* CONFIG_HIGHMEM */
+#ifdef CONFIG_FLATMEM
+#define pfn_valid(pfn)		(((pfn) - ARCH_PFN_OFFSET) < max_mapnr)
+#endif
 
 /*
  * __pa, __va, virt_to_page (ALERT: deprecated, don't use them)
@@ -116,7 +105,7 @@ extern int pfn_valid(unsigned long pfn);
 #define virt_addr_valid(kaddr)  pfn_valid(virt_to_pfn(kaddr))
 
 /* Default Permissions for stack/heaps pages (Non Executable) */
-#define VM_DATA_DEFAULT_FLAGS	VM_DATA_FLAGS_NON_EXEC
+#define VM_DATA_DEFAULT_FLAGS   (VM_READ | VM_WRITE | VM_MAYREAD | VM_MAYWRITE)
 
 #define WANT_PAGE_VIRTUAL   1
 

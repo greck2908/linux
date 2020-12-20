@@ -1233,7 +1233,8 @@ static const struct usb_gadget_ops pxa25x_udc_ops = {
 
 #ifdef CONFIG_USB_GADGET_DEBUG_FS
 
-static int udc_debug_show(struct seq_file *m, void *_d)
+static int
+udc_seq_show(struct seq_file *m, void *_d)
 {
 	struct pxa25x_udc	*dev = m->private;
 	unsigned long		flags;
@@ -1334,12 +1335,25 @@ done:
 	local_irq_restore(flags);
 	return 0;
 }
-DEFINE_SHOW_ATTRIBUTE(udc_debug);
+
+static int
+udc_debugfs_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, udc_seq_show, inode->i_private);
+}
+
+static const struct file_operations debug_fops = {
+	.open		= udc_debugfs_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+	.owner		= THIS_MODULE,
+};
 
 #define create_debug_files(dev) \
 	do { \
 		dev->debugfs_udc = debugfs_create_file(dev->gadget.name, \
-			S_IRUGO, NULL, dev, &udc_debug_fops); \
+			S_IRUGO, NULL, dev, &debug_fops); \
 	} while (0)
 #define remove_debug_files(dev) debugfs_remove(dev->debugfs_udc)
 
@@ -2321,6 +2335,7 @@ static int pxa25x_udc_probe(struct platform_device *pdev)
 	struct pxa25x_udc *dev = &memory;
 	int retval, irq;
 	u32 chiprev;
+	struct resource *res;
 
 	pr_info("%s: version %s\n", driver_name, DRIVER_VERSION);
 
@@ -2340,12 +2355,12 @@ static int pxa25x_udc_probe(struct platform_device *pdev)
 	case PXA250_A0:
 	case PXA250_A1:
 		/* A0/A1 "not released"; ep 13, 15 unusable */
-		fallthrough;
+		/* fall through */
 	case PXA250_B2: case PXA210_B2:
 	case PXA250_B1: case PXA210_B1:
 	case PXA250_B0: case PXA210_B0:
 		/* OUT-DMA is broken ... */
-		fallthrough;
+		/* fall through */
 	case PXA250_C0: case PXA210_C0:
 		break;
 #elif	defined(CONFIG_ARCH_IXP4XX)
@@ -2366,7 +2381,8 @@ static int pxa25x_udc_probe(struct platform_device *pdev)
 	if (irq < 0)
 		return -ENODEV;
 
-	dev->regs = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	dev->regs = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(dev->regs))
 		return PTR_ERR(dev->regs);
 

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
 /* drivers/net/ifb.c:
 
 	The purpose of this driver is to provide a device that allows
@@ -18,6 +17,10 @@
 	You need the tc action  mirror or redirect to feed this device
        	packets.
 
+	This program is free software; you can redistribute it and/or
+	modify it under the terms of the GNU General Public License
+	as published by the Free Software Foundation; either version
+	2 of the License, or (at your option) any later version.
 
   	Authors:	Jamal Hadi Salim (2005)
 
@@ -75,7 +78,7 @@ static void ifb_ri_tasklet(unsigned long _txp)
 	}
 
 	while ((skb = __skb_dequeue(&txp->tq)) != NULL) {
-		skb->redirected = 0;
+		skb->tc_redirected = 0;
 		skb->tc_skip_classify = 1;
 
 		u64_stats_update_begin(&txp->tsync);
@@ -96,10 +99,10 @@ static void ifb_ri_tasklet(unsigned long _txp)
 		rcu_read_unlock();
 		skb->skb_iif = txp->dev->ifindex;
 
-		if (!skb->from_ingress) {
+		if (!skb->tc_from_ingress) {
 			dev_queue_xmit(skb);
 		} else {
-			skb_pull_rcsum(skb, skb->mac_len);
+			skb_pull(skb, skb->mac_len);
 			netif_receive_skb(skb);
 		}
 	}
@@ -187,7 +190,8 @@ static const struct net_device_ops ifb_netdev_ops = {
 };
 
 #define IFB_FEATURES (NETIF_F_HW_CSUM | NETIF_F_SG  | NETIF_F_FRAGLIST	| \
-		      NETIF_F_GSO_SOFTWARE | NETIF_F_GSO_ENCAP_ALL	| \
+		      NETIF_F_TSO_ECN | NETIF_F_TSO | NETIF_F_TSO6	| \
+		      NETIF_F_GSO_ENCAP_ALL 				| \
 		      NETIF_F_HIGHDMA | NETIF_F_HW_VLAN_CTAG_TX		| \
 		      NETIF_F_HW_VLAN_STAG_TX)
 
@@ -242,7 +246,7 @@ static netdev_tx_t ifb_xmit(struct sk_buff *skb, struct net_device *dev)
 	txp->rx_bytes += skb->len;
 	u64_stats_update_end(&txp->rsync);
 
-	if (!skb->redirected || !skb->skb_iif) {
+	if (!skb->tc_redirected || !skb->skb_iif) {
 		dev_kfree_skb(skb);
 		dev->stats.rx_dropped++;
 		return NETDEV_TX_OK;
@@ -326,7 +330,6 @@ static int __init ifb_init_module(void)
 {
 	int i, err;
 
-	down_write(&pernet_ops_rwsem);
 	rtnl_lock();
 	err = __rtnl_link_register(&ifb_link_ops);
 	if (err < 0)
@@ -341,7 +344,6 @@ static int __init ifb_init_module(void)
 
 out:
 	rtnl_unlock();
-	up_write(&pernet_ops_rwsem);
 
 	return err;
 }

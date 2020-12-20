@@ -1,6 +1,9 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright 2014 Bart Tanghe <bart.tanghe@thomasmore.be>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; version 2.
  */
 
 #include <linux/clk.h>
@@ -21,7 +24,7 @@
 #define PERIOD(x)		(((x) * 0x10) + 0x10)
 #define DUTY(x)			(((x) * 0x10) + 0x14)
 
-#define PERIOD_MIN		0x2
+#define MIN_PERIOD		108		/* 9.2 MHz max. PWM clock */
 
 struct bcm2835_pwm {
 	struct pwm_chip chip;
@@ -58,50 +61,68 @@ static void bcm2835_pwm_free(struct pwm_chip *chip, struct pwm_device *pwm)
 	writel(value, pc->base + PWM_CONTROL);
 }
 
-static int bcm2835_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
-			     const struct pwm_state *state)
+static int bcm2835_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
+			      int duty_ns, int period_ns)
 {
-
 	struct bcm2835_pwm *pc = to_bcm2835_pwm(chip);
 	unsigned long rate = clk_get_rate(pc->clk);
-	unsigned long long period;
 	unsigned long scaler;
-	u32 val;
 
 	if (!rate) {
 		dev_err(pc->dev, "failed to get clock rate\n");
 		return -EINVAL;
 	}
 
-	scaler = DIV_ROUND_CLOSEST(NSEC_PER_SEC, rate);
-	/* set period */
-	period = DIV_ROUND_CLOSEST_ULL(state->period, scaler);
+	scaler = NSEC_PER_SEC / rate;
 
-	/* dont accept a period that is too small or has been truncated */
-	if ((period < PERIOD_MIN) || (period > U32_MAX))
+	if (period_ns <= MIN_PERIOD) {
+		dev_err(pc->dev, "period %d not supported, minimum %d\n",
+			period_ns, MIN_PERIOD);
 		return -EINVAL;
+	}
 
-	writel(period, pc->base + PERIOD(pwm->hwpwm));
+	writel(duty_ns / scaler, pc->base + DUTY(pwm->hwpwm));
+	writel(period_ns / scaler, pc->base + PERIOD(pwm->hwpwm));
 
-	/* set duty cycle */
-	val = DIV_ROUND_CLOSEST_ULL(state->duty_cycle, scaler);
-	writel(val, pc->base + DUTY(pwm->hwpwm));
+	return 0;
+}
 
-	/* set polarity */
-	val = readl(pc->base + PWM_CONTROL);
+static int bcm2835_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm)
+{
+	struct bcm2835_pwm *pc = to_bcm2835_pwm(chip);
+	u32 value;
 
-	if (state->polarity == PWM_POLARITY_NORMAL)
-		val &= ~(PWM_POLARITY << PWM_CONTROL_SHIFT(pwm->hwpwm));
+	value = readl(pc->base + PWM_CONTROL);
+	value |= PWM_ENABLE << PWM_CONTROL_SHIFT(pwm->hwpwm);
+	writel(value, pc->base + PWM_CONTROL);
+
+	return 0;
+}
+
+static void bcm2835_pwm_disable(struct pwm_chip *chip, struct pwm_device *pwm)
+{
+	struct bcm2835_pwm *pc = to_bcm2835_pwm(chip);
+	u32 value;
+
+	value = readl(pc->base + PWM_CONTROL);
+	value &= ~(PWM_ENABLE << PWM_CONTROL_SHIFT(pwm->hwpwm));
+	writel(value, pc->base + PWM_CONTROL);
+}
+
+static int bcm2835_set_polarity(struct pwm_chip *chip, struct pwm_device *pwm,
+				enum pwm_polarity polarity)
+{
+	struct bcm2835_pwm *pc = to_bcm2835_pwm(chip);
+	u32 value;
+
+	value = readl(pc->base + PWM_CONTROL);
+
+	if (polarity == PWM_POLARITY_NORMAL)
+		value &= ~(PWM_POLARITY << PWM_CONTROL_SHIFT(pwm->hwpwm));
 	else
-		val |= PWM_POLARITY << PWM_CONTROL_SHIFT(pwm->hwpwm);
+		value |= PWM_POLARITY << PWM_CONTROL_SHIFT(pwm->hwpwm);
 
-	/* enable/disable */
-	if (state->enabled)
-		val |= PWM_ENABLE << PWM_CONTROL_SHIFT(pwm->hwpwm);
-	else
-		val &= ~(PWM_ENABLE << PWM_CONTROL_SHIFT(pwm->hwpwm));
-
-	writel(val, pc->base + PWM_CONTROL);
+	writel(value, pc->base + PWM_CONTROL);
 
 	return 0;
 }
@@ -109,13 +130,17 @@ static int bcm2835_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 static const struct pwm_ops bcm2835_pwm_ops = {
 	.request = bcm2835_pwm_request,
 	.free = bcm2835_pwm_free,
-	.apply = bcm2835_pwm_apply,
+	.config = bcm2835_pwm_config,
+	.enable = bcm2835_pwm_enable,
+	.disable = bcm2835_pwm_disable,
+	.set_polarity = bcm2835_set_polarity,
 	.owner = THIS_MODULE,
 };
 
 static int bcm2835_pwm_probe(struct platform_device *pdev)
 {
 	struct bcm2835_pwm *pc;
+	struct resource *res;
 	int ret;
 
 	pc = devm_kzalloc(&pdev->dev, sizeof(*pc), GFP_KERNEL);
@@ -124,14 +149,16 @@ static int bcm2835_pwm_probe(struct platform_device *pdev)
 
 	pc->dev = &pdev->dev;
 
-	pc->base = devm_platform_ioremap_resource(pdev, 0);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	pc->base = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(pc->base))
 		return PTR_ERR(pc->base);
 
 	pc->clk = devm_clk_get(&pdev->dev, NULL);
-	if (IS_ERR(pc->clk))
-		return dev_err_probe(&pdev->dev, PTR_ERR(pc->clk),
-				     "clock not found\n");
+	if (IS_ERR(pc->clk)) {
+		dev_err(&pdev->dev, "clock not found: %ld\n", PTR_ERR(pc->clk));
+		return PTR_ERR(pc->clk);
+	}
 
 	ret = clk_prepare_enable(pc->clk);
 	if (ret)
@@ -139,7 +166,6 @@ static int bcm2835_pwm_probe(struct platform_device *pdev)
 
 	pc->chip.dev = &pdev->dev;
 	pc->chip.ops = &bcm2835_pwm_ops;
-	pc->chip.base = -1;
 	pc->chip.npwm = 2;
 	pc->chip.of_xlate = of_pwm_xlate_with_flags;
 	pc->chip.of_pwm_n_cells = 3;

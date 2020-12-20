@@ -1,6 +1,10 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2001 Anton Blanchard <anton@au.ibm.com>, IBM
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version
+ * 2 of the License, or (at your option) any later version.
  *
  * Communication to userspace based on kernel/printk.c
  */
@@ -87,8 +91,6 @@ static char *rtas_event_type(int type)
 			return "Dump Notification Event";
 		case RTAS_TYPE_PRRN:
 			return "Platform Resource Reassignment Event";
-		case RTAS_TYPE_HOTPLUG:
-			return "Hotplug Event";
 	}
 
 	return rtas_type[0];
@@ -148,10 +150,8 @@ static void printk_log_rtas(char *buf, int len)
 	} else {
 		struct rtas_error_log *errlog = (struct rtas_error_log *)buf;
 
-		printk(RTAS_DEBUG "event: %d, Type: %s (%d), Severity: %d\n",
-		       error_log_cnt,
-		       rtas_event_type(rtas_error_type(errlog)),
-		       rtas_error_type(errlog),
+		printk(RTAS_DEBUG "event: %d, Type: %s, Severity: %d\n",
+		       error_log_cnt, rtas_event_type(rtas_error_type(errlog)),
 		       rtas_error_severity(errlog));
 	}
 }
@@ -273,14 +273,47 @@ void pSeries_log_error(char *buf, unsigned int err_type, int fatal)
 	}
 }
 
+#ifdef CONFIG_PPC_PSERIES
+static s32 prrn_update_scope;
+
+static void prrn_work_fn(struct work_struct *work)
+{
+	/*
+	 * For PRRN, we must pass the negative of the scope value in
+	 * the RTAS event.
+	 */
+	pseries_devicetree_update(-prrn_update_scope);
+	numa_update_cpu_topology(false);
+}
+
+static DECLARE_WORK(prrn_work, prrn_work_fn);
+
+static void prrn_schedule_update(u32 scope)
+{
+	flush_work(&prrn_work);
+	prrn_update_scope = scope;
+	schedule_work(&prrn_work);
+}
+
 static void handle_rtas_event(const struct rtas_error_log *log)
 {
-	if (!machine_is(pseries))
+	if (rtas_error_type(log) != RTAS_TYPE_PRRN || !prrn_is_enabled())
 		return;
 
-	if (rtas_error_type(log) == RTAS_TYPE_PRRN)
-		pr_info_ratelimited("Platform resource reassignment ignored.\n");
+	/* For PRRN Events the extended log length is used to denote
+	 * the scope for calling rtas update-nodes.
+	 */
+	prrn_schedule_update(rtas_error_extended_log_length(log));
 }
+
+#else
+
+static void handle_rtas_event(const struct rtas_error_log *log)
+{
+	return;
+}
+
+#endif
 
 static int rtas_log_open(struct inode * inode, struct file * file)
 {
@@ -309,7 +342,7 @@ static ssize_t rtas_log_read(struct file * file, char __user * buf,
 
 	count = rtas_error_log_buffer_max;
 
-	if (!access_ok(buf, count))
+	if (!access_ok(VERIFY_WRITE, buf, count))
 		return -EFAULT;
 
 	tmp = kmalloc(count, GFP_KERNEL);
@@ -355,20 +388,20 @@ out:
 	return error;
 }
 
-static __poll_t rtas_log_poll(struct file *file, poll_table * wait)
+static unsigned int rtas_log_poll(struct file *file, poll_table * wait)
 {
 	poll_wait(file, &rtas_log_wait, wait);
 	if (rtas_log_size)
-		return EPOLLIN | EPOLLRDNORM;
+		return POLLIN | POLLRDNORM;
 	return 0;
 }
 
-static const struct proc_ops rtas_log_proc_ops = {
-	.proc_read	= rtas_log_read,
-	.proc_poll	= rtas_log_poll,
-	.proc_open	= rtas_log_open,
-	.proc_release	= rtas_log_release,
-	.proc_lseek	= noop_llseek,
+static const struct file_operations proc_rtas_log_operations = {
+	.read =		rtas_log_read,
+	.poll =		rtas_log_poll,
+	.open =		rtas_log_open,
+	.release =	rtas_log_release,
+	.llseek =	noop_llseek,
 };
 
 static int enable_surveillance(int timeout)
@@ -526,8 +559,7 @@ static int __init rtas_event_scan_init(void)
 	rtas_error_log_max = rtas_get_error_log_max();
 	rtas_error_log_buffer_max = rtas_error_log_max + sizeof(int);
 
-	rtas_log_buf = vmalloc(array_size(LOG_NUMBER,
-					  rtas_error_log_buffer_max));
+	rtas_log_buf = vmalloc(rtas_error_log_buffer_max*LOG_NUMBER);
 	if (!rtas_log_buf) {
 		printk(KERN_ERR "rtasd: no memory\n");
 		return -ENOMEM;
@@ -549,8 +581,8 @@ static int __init rtas_init(void)
 	if (!rtas_log_buf)
 		return -ENODEV;
 
-	entry = proc_create("powerpc/rtas/error_log", 0400, NULL,
-			    &rtas_log_proc_ops);
+	entry = proc_create("powerpc/rtas/error_log", S_IRUSR, NULL,
+			    &proc_rtas_log_operations);
 	if (!entry)
 		printk(KERN_ERR "Failed to create error_log proc entry\n");
 

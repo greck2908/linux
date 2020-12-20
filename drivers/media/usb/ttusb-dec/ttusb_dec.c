@@ -1,9 +1,19 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * TTUSB DEC Driver
  *
  * Copyright (C) 2003-2004 Alex Woods <linux-dvb@giblets.org>
  * IR support by Peter Beutner <p.beutner@gmx.net>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
  */
 
 #include <linux/list.h>
@@ -20,10 +30,10 @@
 
 #include <linux/mutex.h>
 
-#include <media/dmxdev.h>
-#include <media/dvb_demux.h>
-#include <media/dvb_frontend.h>
-#include <media/dvb_net.h>
+#include "dmxdev.h"
+#include "dvb_demux.h"
+#include "dvb_frontend.h"
+#include "dvb_net.h"
 #include "ttusbdecfe.h"
 
 static int debug;
@@ -117,6 +127,7 @@ struct ttusb_dec {
 	struct urb		*irq_urb;
 	dma_addr_t		irq_dma_handle;
 	void			*iso_buffer;
+	dma_addr_t		iso_dma_handle;
 	struct urb		*iso_urb[ISO_BUF_COUNT];
 	int			iso_stream_count;
 	struct mutex		iso_mutex;
@@ -250,7 +261,6 @@ static void ttusb_dec_handle_irq( struct urb *urb)
 	struct ttusb_dec *dec = urb->context;
 	char *buffer = dec->irq_buffer;
 	int retval;
-	int index = buffer[4];
 
 	switch(urb->status) {
 		case 0: /*success*/
@@ -275,18 +285,18 @@ static void ttusb_dec_handle_irq( struct urb *urb)
 		 *
 		 * this is an fact a bit too simple implementation;
 		 * the box also reports a keyrepeat signal
-		 * (with buffer[3] == 0x40) in an interval of ~100ms.
+		 * (with buffer[3] == 0x40) in an intervall of ~100ms.
 		 * But to handle this correctly we had to imlemenent some
 		 * kind of timer which signals a 'key up' event if no
 		 * keyrepeat signal is received for lets say 200ms.
 		 * this should/could be added later ...
 		 * for now lets report each signal as a key down and up
 		 */
-		if (index - 1 < ARRAY_SIZE(rc_keys)) {
-			dprintk("%s:rc signal:%d\n", __func__, index);
-			input_report_key(dec->rc_input_dev, rc_keys[index - 1], 1);
+		if (buffer[4] - 1 < ARRAY_SIZE(rc_keys)) {
+			dprintk("%s:rc signal:%d\n", __func__, buffer[4]);
+			input_report_key(dec->rc_input_dev, rc_keys[buffer[4] - 1], 1);
 			input_sync(dec->rc_input_dev);
-			input_report_key(dec->rc_input_dev, rc_keys[index - 1], 0);
+			input_report_key(dec->rc_input_dev, rc_keys[buffer[4] - 1], 0);
 			input_sync(dec->rc_input_dev);
 		}
 	}
@@ -320,7 +330,7 @@ static int ttusb_dec_send_command(struct ttusb_dec *dec, const u8 command,
 
 	dprintk("%s\n", __func__);
 
-	b = kzalloc(COMMAND_PACKET_SIZE + 4, GFP_KERNEL);
+	b = kmalloc(COMMAND_PACKET_SIZE + 4, GFP_KERNEL);
 	if (!b)
 		return -ENOMEM;
 
@@ -419,7 +429,7 @@ static int ttusb_dec_audio_pes2ts_cb(void *priv, unsigned char *data)
 	struct ttusb_dec *dec = priv;
 
 	dec->audio_filter->feed->cb.ts(data, 188, NULL, 0,
-				       &dec->audio_filter->feed->feed.ts, NULL);
+				       &dec->audio_filter->feed->feed.ts);
 
 	return 0;
 }
@@ -429,7 +439,7 @@ static int ttusb_dec_video_pes2ts_cb(void *priv, unsigned char *data)
 	struct ttusb_dec *dec = priv;
 
 	dec->video_filter->feed->cb.ts(data, 188, NULL, 0,
-				       &dec->video_filter->feed->feed.ts, NULL);
+				       &dec->video_filter->feed->feed.ts);
 
 	return 0;
 }
@@ -481,7 +491,7 @@ static void ttusb_dec_process_pva(struct ttusb_dec *dec, u8 *pva, int length)
 
 		if (output_pva) {
 			dec->video_filter->feed->cb.ts(pva, length, NULL, 0,
-				&dec->video_filter->feed->feed.ts, NULL);
+				&dec->video_filter->feed->feed.ts);
 			return;
 		}
 
@@ -542,7 +552,7 @@ static void ttusb_dec_process_pva(struct ttusb_dec *dec, u8 *pva, int length)
 	case 0x02:		/* MainAudioStream */
 		if (output_pva) {
 			dec->audio_filter->feed->cb.ts(pva, length, NULL, 0,
-				&dec->audio_filter->feed->feed.ts, NULL);
+				&dec->audio_filter->feed->feed.ts);
 			return;
 		}
 
@@ -580,7 +590,7 @@ static void ttusb_dec_process_filter(struct ttusb_dec *dec, u8 *packet,
 
 	if (filter)
 		filter->feed->cb.sec(&packet[2], length - 2, NULL, 0,
-				     &filter->filter, NULL);
+				     &filter->filter);
 }
 
 static void ttusb_dec_process_packet(struct ttusb_dec *dec)
@@ -769,9 +779,9 @@ static void ttusb_dec_process_urb_frame(struct ttusb_dec *dec, u8 *b,
 	}
 }
 
-static void ttusb_dec_process_urb_frame_list(struct tasklet_struct *t)
+static void ttusb_dec_process_urb_frame_list(unsigned long data)
 {
-	struct ttusb_dec *dec = from_tasklet(dec, t, urb_tasklet);
+	struct ttusb_dec *dec = (struct ttusb_dec *)data;
 	struct list_head *item;
 	struct urb_frame *frame;
 	unsigned long flags;
@@ -1175,7 +1185,11 @@ static void ttusb_dec_free_iso_urbs(struct ttusb_dec *dec)
 
 	for (i = 0; i < ISO_BUF_COUNT; i++)
 		usb_free_urb(dec->iso_urb[i]);
-	kfree(dec->iso_buffer);
+
+	pci_free_consistent(NULL,
+			    ISO_FRAME_SIZE * (FRAMES_PER_ISO_BUF *
+					      ISO_BUF_COUNT),
+			    dec->iso_buffer, dec->iso_dma_handle);
 }
 
 static int ttusb_dec_alloc_iso_urbs(struct ttusb_dec *dec)
@@ -1184,10 +1198,15 @@ static int ttusb_dec_alloc_iso_urbs(struct ttusb_dec *dec)
 
 	dprintk("%s\n", __func__);
 
-	dec->iso_buffer = kcalloc(FRAMES_PER_ISO_BUF * ISO_BUF_COUNT,
-			ISO_FRAME_SIZE, GFP_KERNEL);
-	if (!dec->iso_buffer)
+	dec->iso_buffer = pci_zalloc_consistent(NULL,
+						ISO_FRAME_SIZE * (FRAMES_PER_ISO_BUF * ISO_BUF_COUNT),
+						&dec->iso_dma_handle);
+
+	if (!dec->iso_buffer) {
+		dprintk("%s: pci_alloc_consistent - not enough memory\n",
+			__func__);
 		return -ENOMEM;
+	}
 
 	for (i = 0; i < ISO_BUF_COUNT; i++) {
 		struct urb *urb;
@@ -1209,7 +1228,8 @@ static void ttusb_dec_init_tasklet(struct ttusb_dec *dec)
 {
 	spin_lock_init(&dec->urb_frame_list_lock);
 	INIT_LIST_HEAD(&dec->urb_frame_list);
-	tasklet_setup(&dec->urb_tasklet, ttusb_dec_process_urb_frame_list);
+	tasklet_init(&dec->urb_tasklet, ttusb_dec_process_urb_frame_list,
+		     (unsigned long)dec);
 }
 
 static int ttusb_init_rc( struct ttusb_dec *dec)

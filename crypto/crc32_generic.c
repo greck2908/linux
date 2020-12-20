@@ -29,7 +29,6 @@
  * This is crypto api shash wrappers to crc32_le.
  */
 
-#include <asm/unaligned.h>
 #include <linux/crc32.h>
 #include <crypto/internal/hash.h>
 #include <linux/init.h>
@@ -39,6 +38,11 @@
 
 #define CHKSUM_BLOCK_SIZE	1
 #define CHKSUM_DIGEST_SIZE	4
+
+static u32 __crc32_le(u32 crc, unsigned char const *p, size_t len)
+{
+	return crc32_le(crc, p, len);
+}
 
 /** No default init with ~0 */
 static int crc32_cra_init(struct crypto_tfm *tfm)
@@ -50,6 +54,7 @@ static int crc32_cra_init(struct crypto_tfm *tfm)
 	return 0;
 }
 
+
 /*
  * Setting the seed allows arbitrary accumulators and flexible XOR policy
  * If your algorithm starts with ~0, then XOR with ~0 before you set
@@ -60,9 +65,11 @@ static int crc32_setkey(struct crypto_shash *hash, const u8 *key,
 {
 	u32 *mctx = crypto_shash_ctx(hash);
 
-	if (keylen != sizeof(u32))
+	if (keylen != sizeof(u32)) {
+		crypto_shash_set_flags(hash, CRYPTO_TFM_RES_BAD_KEY_LEN);
 		return -EINVAL;
-	*mctx = get_unaligned_le32(key);
+	}
+	*mctx = le32_to_cpup((__le32 *)key);
 	return 0;
 }
 
@@ -81,7 +88,7 @@ static int crc32_update(struct shash_desc *desc, const u8 *data,
 {
 	u32 *crcp = shash_desc_ctx(desc);
 
-	*crcp = crc32_le(*crcp, data, len);
+	*crcp = __crc32_le(*crcp, data, len);
 	return 0;
 }
 
@@ -89,7 +96,7 @@ static int crc32_update(struct shash_desc *desc, const u8 *data,
 static int __crc32_finup(u32 *crcp, const u8 *data, unsigned int len,
 			 u8 *out)
 {
-	put_unaligned_le32(crc32_le(*crcp, data, len), out);
+	*(__le32 *)out = cpu_to_le32(__crc32_le(*crcp, data, len));
 	return 0;
 }
 
@@ -103,7 +110,7 @@ static int crc32_final(struct shash_desc *desc, u8 *out)
 {
 	u32 *crcp = shash_desc_ctx(desc);
 
-	put_unaligned_le32(*crcp, out);
+	*(__le32 *)out = cpu_to_le32p(crcp);
 	return 0;
 }
 
@@ -126,7 +133,6 @@ static struct shash_alg alg = {
 		.cra_name		= "crc32",
 		.cra_driver_name	= "crc32-generic",
 		.cra_priority		= 100,
-		.cra_flags		= CRYPTO_ALG_OPTIONAL_KEY,
 		.cra_blocksize		= CHKSUM_BLOCK_SIZE,
 		.cra_ctxsize		= sizeof(u32),
 		.cra_module		= THIS_MODULE,
@@ -144,7 +150,7 @@ static void __exit crc32_mod_fini(void)
 	crypto_unregister_shash(&alg);
 }
 
-subsys_initcall(crc32_mod_init);
+module_init(crc32_mod_init);
 module_exit(crc32_mod_fini);
 
 MODULE_AUTHOR("Alexander Boyko <alexander_boyko@xyratex.com>");

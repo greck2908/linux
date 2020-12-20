@@ -27,7 +27,6 @@
 #include <asm/page.h>
 #include <asm/sclp.h>
 #include <asm/numa.h>
-#include <asm/facility.h>
 
 #include "sclp.h"
 
@@ -88,17 +87,14 @@ out:
 int _sclp_get_core_info(struct sclp_core_info *info)
 {
 	int rc;
-	int length = test_facility(140) ? EXT_SCCB_READ_CPU : PAGE_SIZE;
 	struct read_cpu_info_sccb *sccb;
 
 	if (!SCLP_HAS_CPU_INFO)
 		return -EOPNOTSUPP;
-
-	sccb = (void *)__get_free_pages(GFP_KERNEL | GFP_DMA | __GFP_ZERO, get_order(length));
+	sccb = (void *) get_zeroed_page(GFP_KERNEL | GFP_DMA);
 	if (!sccb)
 		return -ENOMEM;
-	sccb->header.length = length;
-	sccb->header.control_mask[2] = 0x80;
+	sccb->header.length = sizeof(*sccb);
 	rc = sclp_sync_request_timeout(SCLP_CMDW_READ_CPU_INFO, sccb,
 				       SCLP_QUEUE_INTERVAL);
 	if (rc)
@@ -111,7 +107,7 @@ int _sclp_get_core_info(struct sclp_core_info *info)
 	}
 	sclp_fill_core_info(info, sccb);
 out:
-	free_pages((unsigned long) sccb, get_order(length));
+	free_page((unsigned long) sccb);
 	return rc;
 }
 
@@ -401,16 +397,16 @@ static void __init add_memory_merged(u16 rn)
 		goto skip_add;
 	if (start + size > VMEM_MAX_PHYS)
 		size = VMEM_MAX_PHYS - start;
-	if (start >= ident_map_size)
+	if (memory_end_set && (start >= memory_end))
 		goto skip_add;
-	if (start + size > ident_map_size)
-		size = ident_map_size - start;
+	if (memory_end_set && (start + size > memory_end))
+		size = memory_end - start;
 	block_size = memory_block_size_bytes();
 	align_to_block_size(&start, &size, block_size);
 	if (!size)
 		goto skip_add;
 	for (addr = start; addr < start + size; addr += block_size)
-		add_memory(0, addr, block_size, MHP_NONE);
+		add_memory(numa_pfn_to_nid(PFN_DOWN(addr)), addr, block_size);
 skip_add:
 	first_rn = rn;
 	num = 1;
@@ -464,6 +460,15 @@ static int sclp_mem_freeze(struct device *dev)
 	return -EPERM;
 }
 
+struct read_storage_sccb {
+	struct sccb_header header;
+	u16 max_id;
+	u16 assigned;
+	u16 standby;
+	u16 :16;
+	u32 entries[0];
+} __packed;
+
 static const struct dev_pm_ops sclp_mem_pm_ops = {
 	.freeze		= sclp_mem_freeze,
 };
@@ -493,7 +498,7 @@ static int __init sclp_detect_standby_memory(void)
 	for (id = 0; id <= sclp_max_storage_id; id++) {
 		memset(sccb, 0, PAGE_SIZE);
 		sccb->header.length = PAGE_SIZE;
-		rc = sclp_sync_request(SCLP_CMDW_READ_STORAGE_INFO | id << 8, sccb);
+		rc = sclp_sync_request(0x00040001 | id << 8, sccb);
 		if (rc)
 			goto out;
 		switch (sccb->header.response_code) {

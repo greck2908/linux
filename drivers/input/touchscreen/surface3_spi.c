@@ -1,10 +1,14 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  Driver for Ntrig/Microsoft Touchscreens over SPI
  *
  *  Copyright (c) 2016 Red Hat Inc.
  */
 
+/*
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the Free
+ * Software Foundation; version 2 of the License.
+ */
 
 #include <linux/kernel.h>
 
@@ -219,7 +223,7 @@ static void surface3_spi_power(struct surface3_ts_data *data, bool on)
 /**
  * surface3_spi_get_gpio_config - Get GPIO config from ACPI/DT
  *
- * @data: surface3_spi_ts_data pointer
+ * @ts: surface3_spi_ts_data pointer
  */
 static int surface3_spi_get_gpio_config(struct surface3_ts_data *data)
 {

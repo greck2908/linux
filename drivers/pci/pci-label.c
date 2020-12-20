@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Export the firmware instance and label associated with a PCI device to
- * sysfs
- *
+ * Purpose: Export the firmware instance and label associated with
+ * a pci device to sysfs
  * Copyright (C) 2010 Dell Inc.
  * by Narendra K <Narendra_K@dell.com>,
  * Jordan Hargrave <Jordan_Hargrave@dell.com>
@@ -18,7 +17,7 @@
  * the instance number and string from the type 41 record and exports
  * it to sysfs.
  *
- * Please see https://linux.dell.com/files/biosdevname/ for more
+ * Please see http://linux.dell.com/files/biosdevname/ for more
  * information.
  */
 
@@ -178,7 +177,7 @@ static int dsm_get_label(struct device *dev, char *buf,
 		return -1;
 
 	obj = acpi_evaluate_dsm(handle, &pci_acpi_dsm_guid, 0x2,
-				DSM_PCI_DEVICE_NAME, NULL);
+				DEVICE_LABEL_DSM, NULL);
 	if (!obj)
 		return -1;
 
@@ -218,7 +217,7 @@ static bool device_has_dsm(struct device *dev)
 		return false;
 
 	return !!acpi_check_dsm(handle, &pci_acpi_dsm_guid, 0x2,
-				1 << DSM_PCI_DEVICE_NAME);
+				1 << DEVICE_LABEL_DSM);
 }
 
 static umode_t acpi_index_string_exist(struct kobject *kobj,

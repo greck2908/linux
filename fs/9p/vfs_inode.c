@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/fs/9p/vfs_inode.c
  *
@@ -6,6 +5,22 @@
  *
  *  Copyright (C) 2004 by Eric Van Hensbergen <ericvh@gmail.com>
  *  Copyright (C) 2002 by Ron Minnich <rminnich@lanl.gov>
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License version 2
+ *  as published by the Free Software Foundation.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to:
+ *  Free Software Foundation
+ *  51 Franklin Street, Fifth Floor
+ *  Boston, MA  02111-1301  USA
+ *
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -143,7 +158,7 @@ static umode_t p9mode2unixmode(struct v9fs_session_info *v9ses,
 		default:
 			p9_debug(P9_DEBUG_ERROR, "Unknown special type %c %s\n",
 				 type, stat->extension);
-		}
+		};
 		*rdev = MKDEV(major, minor);
 	} else
 		res |= S_IFREG;
@@ -223,7 +238,8 @@ v9fs_blank_wstat(struct p9_wstat *wstat)
 struct inode *v9fs_alloc_inode(struct super_block *sb)
 {
 	struct v9fs_inode *v9inode;
-	v9inode = kmem_cache_alloc(v9fs_inode_cache, GFP_KERNEL);
+	v9inode = (struct v9fs_inode *)kmem_cache_alloc(v9fs_inode_cache,
+							GFP_KERNEL);
 	if (!v9inode)
 		return NULL;
 #ifdef CONFIG_9P_FSCACHE
@@ -237,13 +253,19 @@ struct inode *v9fs_alloc_inode(struct super_block *sb)
 }
 
 /**
- * v9fs_free_inode - destroy an inode
+ * v9fs_destroy_inode - destroy an inode
  *
  */
 
-void v9fs_free_inode(struct inode *inode)
+static void v9fs_i_callback(struct rcu_head *head)
 {
+	struct inode *inode = container_of(head, struct inode, i_rcu);
 	kmem_cache_free(v9fs_inode_cache, V9FS_I(inode));
+}
+
+void v9fs_destroy_inode(struct inode *inode)
+{
+	call_rcu(&inode->i_rcu, v9fs_i_callback);
 }
 
 int v9fs_init_inode(struct v9fs_session_info *v9ses,
@@ -367,6 +389,59 @@ struct inode *v9fs_get_inode(struct super_block *sb, umode_t mode, dev_t rdev)
 	return inode;
 }
 
+/*
+static struct v9fs_fid*
+v9fs_clone_walk(struct v9fs_session_info *v9ses, u32 fid, struct dentry *dentry)
+{
+	int err;
+	int nfid;
+	struct v9fs_fid *ret;
+	struct v9fs_fcall *fcall;
+
+	nfid = v9fs_get_idpool(&v9ses->fidpool);
+	if (nfid < 0) {
+		eprintk(KERN_WARNING, "no free fids available\n");
+		return ERR_PTR(-ENOSPC);
+	}
+
+	err = v9fs_t_walk(v9ses, fid, nfid, (char *) dentry->d_name.name,
+		&fcall);
+
+	if (err < 0) {
+		if (fcall && fcall->id == RWALK)
+			goto clunk_fid;
+
+		PRINT_FCALL_ERROR("walk error", fcall);
+		v9fs_put_idpool(nfid, &v9ses->fidpool);
+		goto error;
+	}
+
+	kfree(fcall);
+	fcall = NULL;
+	ret = v9fs_fid_create(v9ses, nfid);
+	if (!ret) {
+		err = -ENOMEM;
+		goto clunk_fid;
+	}
+
+	err = v9fs_fid_insert(ret, dentry);
+	if (err < 0) {
+		v9fs_fid_destroy(ret);
+		goto clunk_fid;
+	}
+
+	return ret;
+
+clunk_fid:
+	v9fs_t_clunk(v9ses, nfid);
+
+error:
+	kfree(fcall);
+	return ERR_PTR(err);
+}
+*/
+
+
 /**
  * v9fs_clear_inode - release an inode
  * @inode: inode to release
@@ -463,7 +538,7 @@ static struct inode *v9fs_qid_iget(struct super_block *sb,
 	if (retval)
 		goto error;
 
-	v9fs_stat2inode(st, inode, sb, 0);
+	v9fs_stat2inode(st, inode, sb);
 	v9fs_cache_inode_get_cookie(inode);
 	unlock_new_inode(inode);
 	return inode;
@@ -501,24 +576,6 @@ static int v9fs_at_to_dotl_flags(int flags)
 	if (flags & AT_REMOVEDIR)
 		rflags |= P9_DOTL_AT_REMOVEDIR;
 	return rflags;
-}
-
-/**
- * v9fs_dec_count - helper functon to drop i_nlink.
- *
- * If a directory had nlink <= 2 (including . and ..), then we should not drop
- * the link count, which indicates the underlying exported fs doesn't maintain
- * nlink accurately. e.g.
- * - overlayfs sets nlink to 1 for merged dir
- * - ext4 (with dir_nlink feature enabled) sets nlink to 1 if a dir has more
- *   than EXT4_LINK_MAX (65000) links.
- *
- * @inode: inode whose nlink is being dropped
- */
-static void v9fs_dec_count(struct inode *inode)
-{
-	if (!S_ISDIR(inode->i_mode) || inode->i_nlink > 2)
-		drop_nlink(inode);
 }
 
 /**
@@ -564,9 +621,9 @@ static int v9fs_remove(struct inode *dir, struct dentry *dentry, int flags)
 		 */
 		if (flags & AT_REMOVEDIR) {
 			clear_nlink(inode);
-			v9fs_dec_count(dir);
+			drop_nlink(dir);
 		} else
-			v9fs_dec_count(inode);
+			drop_nlink(inode);
 
 		v9fs_invalidate_inode_attr(inode);
 		v9fs_invalidate_inode_attr(dir);
@@ -748,21 +805,28 @@ struct dentry *v9fs_vfs_lookup(struct inode *dir, struct dentry *dentry,
 	if (IS_ERR(dfid))
 		return ERR_CAST(dfid);
 
+	name = dentry->d_name.name;
+	fid = p9_client_walk(dfid, 1, &name, 1);
+	if (IS_ERR(fid)) {
+		if (fid == ERR_PTR(-ENOENT)) {
+			d_add(dentry, NULL);
+			return NULL;
+		}
+		return ERR_CAST(fid);
+	}
 	/*
 	 * Make sure we don't use a wrong inode due to parallel
 	 * unlink. For cached mode create calls request for new
 	 * inode. But with cache disabled, lookup should do this.
 	 */
-	name = dentry->d_name.name;
-	fid = p9_client_walk(dfid, 1, &name, 1);
-	if (fid == ERR_PTR(-ENOENT))
-		inode = NULL;
-	else if (IS_ERR(fid))
-		inode = ERR_CAST(fid);
-	else if (v9ses->cache == CACHE_LOOSE || v9ses->cache == CACHE_FSCACHE)
+	if (v9ses->cache == CACHE_LOOSE || v9ses->cache == CACHE_FSCACHE)
 		inode = v9fs_get_inode_from_fid(v9ses, fid, dir->i_sb);
 	else
 		inode = v9fs_get_new_inode_from_fid(v9ses, fid, dir->i_sb);
+	if (IS_ERR(inode)) {
+		p9_client_clunk(fid);
+		return ERR_CAST(inode);
+	}
 	/*
 	 * If we had a rename on the server and a parallel lookup
 	 * for the new name, then make sure we instantiate with
@@ -771,20 +835,19 @@ struct dentry *v9fs_vfs_lookup(struct inode *dir, struct dentry *dentry,
 	 * k/b.
 	 */
 	res = d_splice_alias(inode, dentry);
-	if (!IS_ERR(fid)) {
-		if (!res)
-			v9fs_fid_add(dentry, fid);
-		else if (!IS_ERR(res))
-			v9fs_fid_add(res, fid);
-		else
-			p9_client_clunk(fid);
-	}
+	if (!res)
+		v9fs_fid_add(dentry, fid);
+	else if (!IS_ERR(res))
+		v9fs_fid_add(res, fid);
+	else
+		p9_client_clunk(fid);
 	return res;
 }
 
 static int
 v9fs_vfs_atomic_open(struct inode *dir, struct dentry *dentry,
-		     struct file *file, unsigned flags, umode_t mode)
+		     struct file *file, unsigned flags, umode_t mode,
+		     int *opened)
 {
 	int err;
 	u32 perm;
@@ -841,7 +904,7 @@ v9fs_vfs_atomic_open(struct inode *dir, struct dentry *dentry,
 		v9inode->writeback_fid = (void *) inode_fid;
 	}
 	mutex_unlock(&v9inode->v_mutex);
-	err = finish_open(file, dentry, generic_file_open);
+	err = finish_open(file, dentry, generic_file_open, opened);
 	if (err)
 		goto error;
 
@@ -849,7 +912,7 @@ v9fs_vfs_atomic_open(struct inode *dir, struct dentry *dentry,
 	if (v9ses->cache == CACHE_LOOSE || v9ses->cache == CACHE_FSCACHE)
 		v9fs_cache_inode_set_cookie(d_inode(dentry), file);
 
-	file->f_mode |= FMODE_CREATED;
+	*opened |= FILE_CREATED;
 out:
 	dput(res);
 	return err;
@@ -961,12 +1024,12 @@ clunk_newdir:
 			if (S_ISDIR(new_inode->i_mode))
 				clear_nlink(new_inode);
 			else
-				v9fs_dec_count(new_inode);
+				drop_nlink(new_inode);
 		}
 		if (S_ISDIR(old_inode->i_mode)) {
 			if (!new_inode)
 				inc_nlink(new_dir);
-			v9fs_dec_count(old_dir);
+			drop_nlink(old_dir);
 		}
 		v9fs_invalidate_inode_attr(old_inode);
 		v9fs_invalidate_inode_attr(old_dir);
@@ -1017,7 +1080,7 @@ v9fs_vfs_getattr(const struct path *path, struct kstat *stat,
 	if (IS_ERR(st))
 		return PTR_ERR(st);
 
-	v9fs_stat2inode(st, d_inode(dentry), dentry->d_sb, 0);
+	v9fs_stat2inode(st, d_inode(dentry), dentry->d_sb);
 	generic_fillattr(d_inode(dentry), stat);
 
 	p9stat_free(st);
@@ -1036,7 +1099,7 @@ static int v9fs_vfs_setattr(struct dentry *dentry, struct iattr *iattr)
 {
 	int retval;
 	struct v9fs_session_info *v9ses;
-	struct p9_fid *fid = NULL;
+	struct p9_fid *fid;
 	struct p9_wstat wstat;
 
 	p9_debug(P9_DEBUG_VFS, "\n");
@@ -1046,12 +1109,7 @@ static int v9fs_vfs_setattr(struct dentry *dentry, struct iattr *iattr)
 
 	retval = -EPERM;
 	v9ses = v9fs_dentry2v9ses(dentry);
-	if (iattr->ia_valid & ATTR_FILE) {
-		fid = iattr->ia_file->private_data;
-		WARN_ON(!fid);
-	}
-	if (!fid)
-		fid = v9fs_fid_lookup(dentry);
+	fid = v9fs_fid_lookup(dentry);
 	if(IS_ERR(fid))
 		return PTR_ERR(fid);
 
@@ -1100,13 +1158,12 @@ static int v9fs_vfs_setattr(struct dentry *dentry, struct iattr *iattr)
  * @stat: Plan 9 metadata (mistat) structure
  * @inode: inode to populate
  * @sb: superblock of filesystem
- * @flags: control flags (e.g. V9FS_STAT2INODE_KEEP_ISIZE)
  *
  */
 
 void
 v9fs_stat2inode(struct p9_wstat *stat, struct inode *inode,
-		 struct super_block *sb, unsigned int flags)
+	struct super_block *sb)
 {
 	umode_t mode;
 	char ext[32];
@@ -1147,11 +1204,10 @@ v9fs_stat2inode(struct p9_wstat *stat, struct inode *inode,
 	mode = p9mode2perm(v9ses, stat);
 	mode |= inode->i_mode & ~S_IALLUGO;
 	inode->i_mode = mode;
+	i_size_write(inode, stat->length);
 
-	if (!(flags & V9FS_STAT2INODE_KEEP_ISIZE))
-		v9fs_i_size_write(inode, stat->length);
 	/* not real number of blocks, but 512 byte ones ... */
-	inode->i_blocks = (stat->length + 512 - 1) >> 9;
+	inode->i_blocks = (i_size_read(inode) + 512 - 1) >> 9;
 	v9inode->cache_validity &= ~V9FS_INO_INVALID_ATTR;
 }
 
@@ -1348,9 +1404,9 @@ int v9fs_refresh_inode(struct p9_fid *fid, struct inode *inode)
 {
 	int umode;
 	dev_t rdev;
+	loff_t i_size;
 	struct p9_wstat *st;
 	struct v9fs_session_info *v9ses;
-	unsigned int flags;
 
 	v9ses = v9fs_inode2v9ses(inode);
 	st = p9_client_stat(fid);
@@ -1363,13 +1419,16 @@ int v9fs_refresh_inode(struct p9_fid *fid, struct inode *inode)
 	if ((inode->i_mode & S_IFMT) != (umode & S_IFMT))
 		goto out;
 
+	spin_lock(&inode->i_lock);
 	/*
 	 * We don't want to refresh inode->i_size,
 	 * because we may have cached data
 	 */
-	flags = (v9ses->cache == CACHE_LOOSE || v9ses->cache == CACHE_FSCACHE) ?
-		V9FS_STAT2INODE_KEEP_ISIZE : 0;
-	v9fs_stat2inode(st, inode, inode->i_sb, flags);
+	i_size = inode->i_size;
+	v9fs_stat2inode(st, inode, inode->i_sb);
+	if (v9ses->cache == CACHE_LOOSE || v9ses->cache == CACHE_FSCACHE)
+		inode->i_size = i_size;
+	spin_unlock(&inode->i_lock);
 out:
 	p9stat_free(st);
 	kfree(st);

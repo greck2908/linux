@@ -1,7 +1,10 @@
-/* SPDX-License-Identifier: GPL-2.0-only */
 /* The industrial I/O core, trigger handling functions
  *
  * Copyright (c) 2008 Jonathan Cameron
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published by
+ * the Free Software Foundation.
  */
 #include <linux/irq.h>
 #include <linux/module.h>
@@ -21,7 +24,7 @@ struct iio_trigger;
 /**
  * struct iio_trigger_ops - operations structure for an iio_trigger.
  * @set_trigger_state:	switch on/off the trigger on demand
- * @reenable:		function to reenable the trigger when the
+ * @try_reenable:	function to reenable the trigger when the
  *			use count is zero (may be NULL)
  * @validate_device:	function to validate the device when the
  *			current trigger gets changed.
@@ -31,7 +34,7 @@ struct iio_trigger;
  **/
 struct iio_trigger_ops {
 	int (*set_trigger_state)(struct iio_trigger *trig, bool state);
-	void (*reenable)(struct iio_trigger *trig);
+	int (*try_reenable)(struct iio_trigger *trig);
 	int (*validate_device)(struct iio_trigger *trig,
 			       struct iio_dev *indio_dev);
 };
@@ -40,13 +43,12 @@ struct iio_trigger_ops {
 /**
  * struct iio_trigger - industrial I/O trigger device
  * @ops:		[DRIVER] operations structure
- * @owner:		[INTERN] owner of this driver module
  * @id:			[INTERN] unique id number
  * @name:		[DRIVER] unique name
  * @dev:		[DRIVER] associated device (if relevant)
  * @list:		[INTERN] used in maintenance of global trigger list
  * @alloc_list:		[DRIVER] used for driver specific trigger list
- * @use_count:		[INTERN] use count for the trigger.
+ * @use_count:		use count for the trigger
  * @subirq_chip:	[INTERN] associate 'virtual' irq chip.
  * @subirq_base:	[INTERN] base number for irqs provided by trigger.
  * @subirqs:		[INTERN] information about the 'child' irqs.
@@ -97,7 +99,7 @@ static inline struct iio_trigger *iio_trigger_get(struct iio_trigger *trig)
 }
 
 /**
- * iio_trigger_set_drvdata() - Set trigger driver data
+ * iio_device_set_drvdata() - Set trigger driver data
  * @trig: IIO trigger structure
  * @data: Driver specific data
  *
@@ -140,6 +142,9 @@ int __devm_iio_trigger_register(struct device *dev,
  * @trig_info:	trigger to be unregistered
  **/
 void iio_trigger_unregister(struct iio_trigger *trig_info);
+
+void devm_iio_trigger_unregister(struct device *dev,
+				 struct iio_trigger *trig_info);
 
 /**
  * iio_trigger_set_immutable() - set an immutable trigger on destination

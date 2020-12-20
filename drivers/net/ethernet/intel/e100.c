@@ -1,5 +1,30 @@
-// SPDX-License-Identifier: GPL-2.0
-/* Copyright(c) 1999 - 2006 Intel Corporation. */
+/*******************************************************************************
+
+  Intel PRO/100 Linux driver
+  Copyright(c) 1999 - 2006 Intel Corporation.
+
+  This program is free software; you can redistribute it and/or modify it
+  under the terms and conditions of the GNU General Public License,
+  version 2, as published by the Free Software Foundation.
+
+  This program is distributed in the hope it will be useful, but WITHOUT
+  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+  more details.
+
+  You should have received a copy of the GNU General Public License along with
+  this program; if not, write to the Free Software Foundation, Inc.,
+  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
+
+  The full GNU General Public License is included in this distribution in
+  the file called "COPYING".
+
+  Contact Information:
+  Linux NICS <linux.nics@intel.com>
+  e1000-devel Mailing List <e1000-devel@lists.sourceforge.net>
+  Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
+
+*******************************************************************************/
 
 /*
  *	e100.c: Intel(R) PRO/100 ethernet driver
@@ -150,6 +175,8 @@
 
 
 #define DRV_NAME		"e100"
+#define DRV_EXT			"-NAPI"
+#define DRV_VERSION		"3.5.24-k2"DRV_EXT
 #define DRV_DESCRIPTION		"Intel(R) PRO/100 Network Driver"
 #define DRV_COPYRIGHT		"Copyright(c) 1999-2006 Intel Corporation"
 
@@ -162,7 +189,8 @@
 
 MODULE_DESCRIPTION(DRV_DESCRIPTION);
 MODULE_AUTHOR(DRV_COPYRIGHT);
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");
+MODULE_VERSION(DRV_VERSION);
 MODULE_FIRMWARE(FIRMWARE_D101M);
 MODULE_FIRMWARE(FIRMWARE_D101S);
 MODULE_FIRMWARE(FIRMWARE_D102E);
@@ -384,7 +412,7 @@ enum cb_status {
 	cb_ok       = 0x2000,
 };
 
-/*
+/**
  * cb_command - Command Block flags
  * @cb_tx_nc:  0: controller does CRC (normal),  1: CRC from skb memory
  */
@@ -579,7 +607,7 @@ struct nic {
 	struct mem *mem;
 	dma_addr_t dma_addr;
 
-	struct dma_pool *cbs_pool;
+	struct pci_pool *cbs_pool;
 	dma_addr_t cbs_dma_addr;
 	u8 adaptive_ifs;
 	u8 tx_threshold;
@@ -1342,8 +1370,8 @@ static inline int e100_load_ucode_wait(struct nic *nic)
 
 	fw = e100_request_firmware(nic);
 	/* If it's NULL, then no ucode is required */
-	if (IS_ERR_OR_NULL(fw))
-		return PTR_ERR_OR_ZERO(fw);
+	if (!fw || IS_ERR(fw))
+		return PTR_ERR(fw);
 
 	if ((err = e100_exec_cb(nic, (void *)fw, e100_setup_ucode)))
 		netif_err(nic, probe, nic->netdev,
@@ -1531,7 +1559,7 @@ static int e100_hw_init(struct nic *nic)
 	e100_hw_reset(nic);
 
 	netif_err(nic, hw, nic->netdev, "e100_hw_init\n");
-	if ((err = e100_self_test(nic)))
+	if (!in_interrupt() && (err = e100_self_test(nic)))
 		return err;
 
 	if ((err = e100_phy_init(nic)))
@@ -1864,7 +1892,7 @@ static void e100_clean_cbs(struct nic *nic)
 			nic->cb_to_clean = nic->cb_to_clean->next;
 			nic->cbs_avail++;
 		}
-		dma_pool_free(nic->cbs_pool, nic->cbs, nic->cbs_dma_addr);
+		pci_pool_free(nic->cbs_pool, nic->cbs, nic->cbs_dma_addr);
 		nic->cbs = NULL;
 		nic->cbs_avail = 0;
 	}
@@ -1882,7 +1910,7 @@ static int e100_alloc_cbs(struct nic *nic)
 	nic->cb_to_use = nic->cb_to_send = nic->cb_to_clean = NULL;
 	nic->cbs_avail = 0;
 
-	nic->cbs = dma_pool_zalloc(nic->cbs_pool, GFP_KERNEL,
+	nic->cbs = pci_pool_zalloc(nic->cbs_pool, GFP_KERNEL,
 				   &nic->cbs_dma_addr);
 	if (!nic->cbs)
 		return -ENOMEM;
@@ -2155,7 +2183,7 @@ static int e100_rx_alloc_list(struct nic *nic)
 	nic->rx_to_use = nic->rx_to_clean = NULL;
 	nic->ru_running = RU_UNINITIALIZED;
 
-	if (!(nic->rxs = kcalloc(count, sizeof(struct rx), GFP_KERNEL)))
+	if (!(nic->rxs = kcalloc(count, sizeof(struct rx), GFP_ATOMIC)))
 		return -ENOMEM;
 
 	for (rx = nic->rxs, i = 0; i < count; rx++, i++) {
@@ -2222,13 +2250,11 @@ static int e100_poll(struct napi_struct *napi, int budget)
 	e100_rx_clean(nic, &work_done, budget);
 	e100_tx_clean(nic);
 
-	/* If budget fully consumed, continue polling */
-	if (work_done == budget)
-		return budget;
-
-	/* only re-enable interrupt if stack agrees polling is really done */
-	if (likely(napi_complete_done(napi, work_done)))
+	/* If budget not fully consumed, exit the polling mode */
+	if (work_done < budget) {
+		napi_complete_done(napi, work_done);
 		e100_enable_irq(nic);
+	}
 
 	return work_done;
 }
@@ -2313,7 +2339,7 @@ static void e100_down(struct nic *nic)
 	e100_rx_clean_list(nic);
 }
 
-static void e100_tx_timeout(struct net_device *netdev, unsigned int txqueue)
+static void e100_tx_timeout(struct net_device *netdev)
 {
 	struct nic *nic = netdev_priv(netdev);
 
@@ -2427,6 +2453,7 @@ static void e100_get_drvinfo(struct net_device *netdev,
 {
 	struct nic *nic = netdev_priv(netdev);
 	strlcpy(info->driver, DRV_NAME, sizeof(info->driver));
+	strlcpy(info->version, DRV_VERSION, sizeof(info->version));
 	strlcpy(info->bus_info, pci_name(nic->pdev),
 		sizeof(info->bus_info));
 }
@@ -2593,7 +2620,7 @@ static void e100_diag_test(struct net_device *netdev,
 {
 	struct ethtool_cmd cmd;
 	struct nic *nic = netdev_priv(netdev);
-	int i;
+	int i, err;
 
 	memset(data, 0, E100_TEST_LEN * sizeof(u64));
 	data[0] = !mii_link_ok(&nic->mii);
@@ -2601,7 +2628,7 @@ static void e100_diag_test(struct net_device *netdev,
 	if (test->flags & ETH_TEST_FL_OFFLINE) {
 
 		/* save speed, duplex & autoneg settings */
-		mii_ethtool_gset(&nic->mii, &cmd);
+		err = mii_ethtool_gset(&nic->mii, &cmd);
 
 		if (netif_running(netdev))
 			e100_down(nic);
@@ -2610,7 +2637,7 @@ static void e100_diag_test(struct net_device *netdev,
 		data[4] = e100_loopback_test(nic, lb_phy);
 
 		/* restore speed, duplex & autoneg settings */
-		mii_ethtool_sset(&nic->mii, &cmd);
+		err = mii_ethtool_sset(&nic->mii, &cmd);
 
 		if (netif_running(netdev))
 			e100_up(nic);
@@ -2793,7 +2820,7 @@ static int e100_set_features(struct net_device *netdev,
 
 	netdev->features = features;
 	e100_exec_cb(nic, NULL, e100_configure);
-	return 1;
+	return 0;
 }
 
 static const struct net_device_ops e100_netdev_ops = {
@@ -2933,8 +2960,8 @@ static int e100_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		netif_err(nic, probe, nic->netdev, "Cannot register net device, aborting\n");
 		goto err_out_free;
 	}
-	nic->cbs_pool = dma_pool_create(netdev->name,
-			   &nic->pdev->dev,
+	nic->cbs_pool = pci_pool_create(netdev->name,
+			   nic->pdev,
 			   nic->params.cbs.max * sizeof(struct cb),
 			   sizeof(u32),
 			   0);
@@ -2974,7 +3001,7 @@ static void e100_remove(struct pci_dev *pdev)
 		unregister_netdev(netdev);
 		e100_free(nic);
 		pci_iounmap(pdev, nic->csr);
-		dma_pool_destroy(nic->cbs_pool);
+		pci_pool_destroy(nic->cbs_pool);
 		free_netdev(netdev);
 		pci_release_regions(pdev);
 		pci_disable_device(pdev);
@@ -2992,6 +3019,8 @@ static void __e100_shutdown(struct pci_dev *pdev, bool *enable_wake)
 	if (netif_running(netdev))
 		e100_down(nic);
 	netif_device_detach(netdev);
+
+	pci_save_state(pdev);
 
 	if ((nic->flags & wol_magic) | e100_asf(nic)) {
 		/* enable reverse auto-negotiation */
@@ -3022,21 +3051,23 @@ static int __e100_power_off(struct pci_dev *pdev, bool wake)
 	return 0;
 }
 
-static int __maybe_unused e100_suspend(struct device *dev_d)
+#ifdef CONFIG_PM
+static int e100_suspend(struct pci_dev *pdev, pm_message_t state)
 {
 	bool wake;
-
-	__e100_shutdown(to_pci_dev(dev_d), &wake);
-
-	device_wakeup_disable(dev_d);
-
-	return 0;
+	__e100_shutdown(pdev, &wake);
+	return __e100_power_off(pdev, wake);
 }
 
-static int __maybe_unused e100_resume(struct device *dev_d)
+static int e100_resume(struct pci_dev *pdev)
 {
-	struct net_device *netdev = dev_get_drvdata(dev_d);
+	struct net_device *netdev = pci_get_drvdata(pdev);
 	struct nic *nic = netdev_priv(netdev);
+
+	pci_set_power_state(pdev, PCI_D0);
+	pci_restore_state(pdev);
+	/* ack any pending wake events, disable PME */
+	pci_enable_wake(pdev, PCI_D0, 0);
 
 	/* disable reverse auto-negotiation */
 	if (nic->phy == phy_82552_v) {
@@ -3054,6 +3085,7 @@ static int __maybe_unused e100_resume(struct device *dev_d)
 
 	return 0;
 }
+#endif /* CONFIG_PM */
 
 static void e100_shutdown(struct pci_dev *pdev)
 {
@@ -3141,17 +3173,16 @@ static const struct pci_error_handlers e100_err_handler = {
 	.resume = e100_io_resume,
 };
 
-static SIMPLE_DEV_PM_OPS(e100_pm_ops, e100_suspend, e100_resume);
-
 static struct pci_driver e100_driver = {
 	.name =         DRV_NAME,
 	.id_table =     e100_id_table,
 	.probe =        e100_probe,
 	.remove =       e100_remove,
-
+#ifdef CONFIG_PM
 	/* Power Management hooks */
-	.driver.pm =	&e100_pm_ops,
-
+	.suspend =      e100_suspend,
+	.resume =       e100_resume,
+#endif
 	.shutdown =     e100_shutdown,
 	.err_handler = &e100_err_handler,
 };
@@ -3159,7 +3190,7 @@ static struct pci_driver e100_driver = {
 static int __init e100_init_module(void)
 {
 	if (((1 << debug) - 1) & NETIF_MSG_DRV) {
-		pr_info("%s\n", DRV_DESCRIPTION);
+		pr_info("%s, %s\n", DRV_DESCRIPTION, DRV_VERSION);
 		pr_info("%s\n", DRV_COPYRIGHT);
 	}
 	return pci_register_driver(&e100_driver);

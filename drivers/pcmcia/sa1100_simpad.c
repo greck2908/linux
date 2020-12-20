@@ -12,18 +12,21 @@
 
 #include <mach/hardware.h>
 #include <asm/mach-types.h>
+#include <asm/irq.h>
 #include <mach/simpad.h>
 #include "sa1100_generic.h"
-
+ 
 static int simpad_pcmcia_hw_init(struct soc_pcmcia_socket *skt)
 {
 
 	simpad_clear_cs3_bit(VCC_3V_EN|VCC_5V_EN|EN0|EN1);
 
-	skt->stat[SOC_STAT_CD].name = "cf-detect";
-	skt->stat[SOC_STAT_RDY].name = "cf-ready";
+	skt->stat[SOC_STAT_CD].gpio = GPIO_CF_CD;
+	skt->stat[SOC_STAT_CD].name = "CF_CD";
+	skt->stat[SOC_STAT_RDY].gpio = GPIO_CF_IRQ;
+	skt->stat[SOC_STAT_RDY].name = "CF_RDY";
 
-	return soc_pcmcia_request_gpiods(skt);
+	return 0;
 }
 
 static void simpad_pcmcia_hw_shutdown(struct soc_pcmcia_socket *skt)
@@ -39,8 +42,11 @@ simpad_pcmcia_socket_state(struct soc_pcmcia_socket *skt,
 {
 	long cs3reg = simpad_get_cs3_ro();
 
-	/* bvd1 might be cs3reg & PCMCIA_BVD1 */
-	/* bvd2 might be cs3reg & PCMCIA_BVD2 */
+	/* the detect signal is inverted - fix that up here */
+	state->detect = !state->detect;
+
+	state->bvd1 = 1; /* Might be cs3reg & PCMCIA_BVD1 */
+	state->bvd2 = 1; /* Might be cs3reg & PCMCIA_BVD2 */
 
 	if ((cs3reg & (PCMCIA_VS1|PCMCIA_VS2)) ==
 			(PCMCIA_VS1|PCMCIA_VS2)) {
@@ -66,7 +72,7 @@ simpad_pcmcia_configure_socket(struct soc_pcmcia_socket *skt,
 		simpad_clear_cs3_bit(VCC_3V_EN|VCC_5V_EN|EN0|EN1);
 		break;
 
-	case 33:
+	case 33:  
 		simpad_clear_cs3_bit(VCC_3V_EN|EN1);
 		simpad_set_cs3_bit(VCC_5V_EN|EN0);
 		break;
@@ -95,7 +101,7 @@ static void simpad_pcmcia_socket_suspend(struct soc_pcmcia_socket *skt)
 	simpad_set_cs3_bit(PCMCIA_RESET);
 }
 
-static struct pcmcia_low_level simpad_pcmcia_ops = {
+static struct pcmcia_low_level simpad_pcmcia_ops = { 
 	.owner			= THIS_MODULE,
 	.hw_init		= simpad_pcmcia_hw_init,
 	.hw_shutdown		= simpad_pcmcia_hw_shutdown,

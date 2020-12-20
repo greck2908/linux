@@ -559,7 +559,6 @@ static void source_sink_complete(struct usb_ep *ep, struct usb_request *req)
 #if 1
 		DBG(cdev, "%s complete --> %d, %d/%d\n", ep->name,
 				status, req->actual, req->length);
-		break;
 #endif
 	case -EREMOTEIO:		/* short read */
 		break;
@@ -839,7 +838,7 @@ static struct usb_function *source_sink_alloc_func(
 
 	ss = kzalloc(sizeof(*ss), GFP_KERNEL);
 	if (!ss)
-		return ERR_PTR(-ENOMEM);
+		return NULL;
 
 	ss_opts =  container_of(fi, struct f_ss_opts, func_inst);
 

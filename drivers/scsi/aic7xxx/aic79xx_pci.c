@@ -41,8 +41,14 @@
  * $Id: //depot/aic7xxx/aic7xxx/aic79xx_pci.c#92 $
  */
 
+#ifdef __linux__
 #include "aic79xx_osm.h"
 #include "aic79xx_inline.h"
+#else
+#include <dev/aic7xxx/aic79xx_osm.h>
+#include <dev/aic7xxx/aic79xx_inline.h>
+#endif
+
 #include "aic79xx_pci.h"
 
 static inline uint64_t
@@ -288,11 +294,13 @@ ahd_find_pci_device(ahd_dev_softc_t pci)
 int
 ahd_pci_config(struct ahd_softc *ahd, const struct ahd_pci_identity *entry)
 {
+	struct scb_data *shared_scb_data;
 	u_int		 command;
 	uint32_t	 devconfig;
 	uint16_t	 subvendor; 
 	int		 error;
 
+	shared_scb_data = NULL;
 	ahd->description = entry->name;
 	/*
 	 * Record if this is an HP board.
@@ -377,7 +385,8 @@ ahd_pci_config(struct ahd_softc *ahd, const struct ahd_pci_identity *entry)
 	return ahd_pci_map_int(ahd);
 }
 
-void __maybe_unused
+#ifdef CONFIG_PM
+void
 ahd_pci_suspend(struct ahd_softc *ahd)
 {
 	/*
@@ -393,7 +402,7 @@ ahd_pci_suspend(struct ahd_softc *ahd)
 
 }
 
-void __maybe_unused
+void
 ahd_pci_resume(struct ahd_softc *ahd)
 {
 	ahd_pci_write_config(ahd->dev_softc, DEVCONFIG,
@@ -403,6 +412,7 @@ ahd_pci_resume(struct ahd_softc *ahd)
 	ahd_pci_write_config(ahd->dev_softc, CSIZE_LATTIME,
 			     ahd->suspend_state.pci_state.csize_lattime, /*bytes*/1);
 }
+#endif
 
 /*
  * Perform some simple tests that should catch situations where

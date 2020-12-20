@@ -125,7 +125,11 @@ static tree handle_latent_entropy_attribute(tree *node, tree name,
 						bool *no_add_attrs)
 {
 	tree type;
+#if BUILDING_GCC_VERSION <= 4007
+	VEC(constructor_elt, gc) *vals;
+#else
 	vec<constructor_elt, va_gc> *vals;
+#endif
 
 	switch (TREE_CODE(*node)) {
 	default:
@@ -177,7 +181,11 @@ static tree handle_latent_entropy_attribute(tree *node, tree name,
 			if (fld)
 				break;
 
+#if BUILDING_GCC_VERSION <= 4007
+			vals = VEC_alloc(constructor_elt, gc, nelt);
+#else
 			vec_alloc(vals, nelt);
+#endif
 
 			for (fld = lst; fld; fld = TREE_CHAIN(fld)) {
 				tree random_const, fld_t = TREE_TYPE(fld);
@@ -217,7 +225,11 @@ static tree handle_latent_entropy_attribute(tree *node, tree name,
 			elt_size_int = TREE_INT_CST_LOW(elt_size);
 			nelt = array_size_int / elt_size_int;
 
+#if BUILDING_GCC_VERSION <= 4007
+			vals = VEC_alloc(constructor_elt, gc, nelt);
+#else
 			vec_alloc(vals, nelt);
+#endif
 
 			for (i = 0; i < nelt; i++) {
 				tree cst = size_int(i);
@@ -243,14 +255,21 @@ static tree handle_latent_entropy_attribute(tree *node, tree name,
 	return NULL_TREE;
 }
 
-static struct attribute_spec latent_entropy_attr = { };
+static struct attribute_spec latent_entropy_attr = {
+	.name				= "latent_entropy",
+	.min_length			= 0,
+	.max_length			= 0,
+	.decl_required			= true,
+	.type_required			= false,
+	.function_type_required		= false,
+	.handler			= handle_latent_entropy_attribute,
+#if BUILDING_GCC_VERSION >= 4007
+	.affects_type_identity		= false
+#endif
+};
 
 static void register_attributes(void *event_data __unused, void *data __unused)
 {
-	latent_entropy_attr.name		= "latent_entropy";
-	latent_entropy_attr.decl_required	= true;
-	latent_entropy_attr.handler		= handle_latent_entropy_attribute;
-
 	register_attribute(&latent_entropy_attr);
 }
 

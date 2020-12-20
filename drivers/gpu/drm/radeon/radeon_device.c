@@ -25,24 +25,15 @@
  *          Alex Deucher
  *          Jerome Glisse
  */
-
 #include <linux/console.h>
-#include <linux/efi.h>
-#include <linux/pci.h>
-#include <linux/pm_runtime.h>
 #include <linux/slab.h>
-#include <linux/vga_switcheroo.h>
-#include <linux/vgaarb.h>
-
-#include <drm/drm_cache.h>
+#include <drm/drmP.h>
 #include <drm/drm_crtc_helper.h>
-#include <drm/drm_debugfs.h>
-#include <drm/drm_device.h>
-#include <drm/drm_file.h>
-#include <drm/drm_probe_helper.h>
 #include <drm/radeon_drm.h>
-
-#include "radeon_device.h"
+#include <linux/pm_runtime.h>
+#include <linux/vgaarb.h>
+#include <linux/vga_switcheroo.h>
+#include <linux/efi.h>
 #include "radeon_reg.h"
 #include "radeon.h"
 #include "atom.h"
@@ -148,10 +139,6 @@ static struct radeon_px_quirk radeon_px_quirk_list[] = {
 	 * https://bugs.freedesktop.org/show_bug.cgi?id=101491
 	 */
 	{ PCI_VENDOR_ID_ATI, 0x6741, 0x1043, 0x2122, RADEON_PX_QUIRK_DISABLE_PX },
-	/* Asus K73TK laptop with AMD A6-3420M APU and Radeon 7670m GPU
-	 * https://bugzilla.kernel.org/show_bug.cgi?id=51381#c52
-	 */
-	{ PCI_VENDOR_ID_ATI, 0x6840, 0x1043, 0x2123, RADEON_PX_QUIRK_DISABLE_PX },
 	{ 0, 0, 0, 0, 0 },
 };
 
@@ -405,6 +392,37 @@ void radeon_doorbell_free(struct radeon_device *rdev, u32 doorbell)
 		__clear_bit(doorbell, rdev->doorbell.used);
 }
 
+/**
+ * radeon_doorbell_get_kfd_info - Report doorbell configuration required to
+ *                                setup KFD
+ *
+ * @rdev: radeon_device pointer
+ * @aperture_base: output returning doorbell aperture base physical address
+ * @aperture_size: output returning doorbell aperture size in bytes
+ * @start_offset: output returning # of doorbell bytes reserved for radeon.
+ *
+ * Radeon and the KFD share the doorbell aperture. Radeon sets it up,
+ * takes doorbells required for its own rings and reports the setup to KFD.
+ * Radeon reserved doorbells are at the start of the doorbell aperture.
+ */
+void radeon_doorbell_get_kfd_info(struct radeon_device *rdev,
+				  phys_addr_t *aperture_base,
+				  size_t *aperture_size,
+				  size_t *start_offset)
+{
+	/* The first num_doorbells are used by radeon.
+	 * KFD takes whatever's left in the aperture. */
+	if (rdev->doorbell.size > rdev->doorbell.num_doorbells * sizeof(u32)) {
+		*aperture_base = rdev->doorbell.base;
+		*aperture_size = rdev->doorbell.size;
+		*start_offset = rdev->doorbell.num_doorbells * sizeof(u32);
+	} else {
+		*aperture_base = 0;
+		*aperture_size = 0;
+		*start_offset = 0;
+	}
+}
+
 /*
  * radeon_wb_*()
  * Writeback is the the method by which the the GPU updates special pages
@@ -545,21 +563,21 @@ int radeon_wb_init(struct radeon_device *rdev)
  * Note: GTT start, end, size should be initialized before calling this
  * function on AGP platform.
  *
- * Note 1: We don't explicitly enforce VRAM start to be aligned on VRAM size,
+ * Note: We don't explicitly enforce VRAM start to be aligned on VRAM size,
  * this shouldn't be a problem as we are using the PCI aperture as a reference.
  * Otherwise this would be needed for rv280, all r3xx, and all r4xx, but
  * not IGP.
  *
- * Note 2: we use mc_vram_size as on some board we need to program the mc to
+ * Note: we use mc_vram_size as on some board we need to program the mc to
  * cover the whole aperture even if VRAM size is inferior to aperture size
  * Novell bug 204882 + along with lots of ubuntu ones
  *
- * Note 3: when limiting vram it's safe to overwritte real_vram_size because
+ * Note: when limiting vram it's safe to overwritte real_vram_size because
  * we are not in case where real_vram_size is inferior to mc_vram_size (ie
  * note afected by bogus hw of Novell bug 204882 + along with lots of ubuntu
  * ones)
  *
- * Note 4: IGP TOM addr should be the same as the aperture addr, we don't
+ * Note: IGP TOM addr should be the same as the aperture addr, we don't
  * explicitly check for that thought.
  *
  * FIXME: when reducing VRAM size align new size on power of 2.
@@ -628,7 +646,7 @@ void radeon_gtt_location(struct radeon_device *rdev, struct radeon_mc *mc)
  * GPU helpers function.
  */
 
-/*
+/**
  * radeon_device_is_virtual - check if we are running is a virtual environment
  *
  * Check if the asic has been passed through to a VM (all asics).
@@ -785,9 +803,9 @@ int radeon_dummy_page_init(struct radeon_device *rdev)
 	rdev->dummy_page.page = alloc_page(GFP_DMA32 | GFP_KERNEL | __GFP_ZERO);
 	if (rdev->dummy_page.page == NULL)
 		return -ENOMEM;
-	rdev->dummy_page.addr = dma_map_page(&rdev->pdev->dev, rdev->dummy_page.page,
+	rdev->dummy_page.addr = pci_map_page(rdev->pdev, rdev->dummy_page.page,
 					0, PAGE_SIZE, PCI_DMA_BIDIRECTIONAL);
-	if (dma_mapping_error(&rdev->pdev->dev, rdev->dummy_page.addr)) {
+	if (pci_dma_mapping_error(rdev->pdev, rdev->dummy_page.addr)) {
 		dev_err(&rdev->pdev->dev, "Failed to DMA MAP the dummy page\n");
 		__free_page(rdev->dummy_page.page);
 		rdev->dummy_page.page = NULL;
@@ -1101,7 +1119,7 @@ static bool radeon_check_pot_argument(int arg)
 /**
  * Determine a sensible default GART size according to ASIC family.
  *
- * @family: ASIC family name
+ * @family ASIC family name
  */
 static int radeon_gart_size_auto(enum radeon_family family)
 {
@@ -1264,7 +1282,7 @@ static bool radeon_switcheroo_can_switch(struct pci_dev *pdev)
 	 * locking inversion with the driver load path. And the access here is
 	 * completely racy anyway. So don't bother with locking for now.
 	 */
-	return atomic_read(&dev->open_count) == 0;
+	return dev->open_count == 0;
 }
 
 static const struct vga_switcheroo_client_ops radeon_switcheroo_ops = {
@@ -1277,7 +1295,7 @@ static const struct vga_switcheroo_client_ops radeon_switcheroo_ops = {
  * radeon_device_init - initialize the driver
  *
  * @rdev: radeon_device pointer
- * @ddev: drm dev pointer
+ * @pdev: drm dev pointer
  * @pdev: pci dev pointer
  * @flags: driver flags
  *
@@ -1323,9 +1341,12 @@ int radeon_device_init(struct radeon_device *rdev,
 	mutex_init(&rdev->pm.mutex);
 	mutex_init(&rdev->gpu_clock_mutex);
 	mutex_init(&rdev->srbm_mutex);
+	mutex_init(&rdev->grbm_idx_mutex);
 	init_rwsem(&rdev->pm.mclk_lock);
 	init_rwsem(&rdev->exclusive_lock);
 	init_waitqueue_head(&rdev->irq.vblank_queue);
+	mutex_init(&rdev->mn_lock);
+	hash_init(rdev->mn_hash);
 	r = radeon_gem_init(rdev);
 	if (r)
 		return r;
@@ -1364,29 +1385,31 @@ int radeon_device_init(struct radeon_device *rdev,
 	else
 		rdev->mc.mc_mask = 0xffffffffULL; /* 32 bit MC */
 
-	/* set DMA mask.
+	/* set DMA mask + need_dma32 flags.
 	 * PCIE - can handle 40-bits.
 	 * IGP - can handle 40-bits
 	 * AGP - generally dma32 is safest
 	 * PCI - dma32 for legacy pci gart, 40 bits on newer asics
 	 */
-	dma_bits = 40;
+	rdev->need_dma32 = false;
 	if (rdev->flags & RADEON_IS_AGP)
-		dma_bits = 32;
+		rdev->need_dma32 = true;
 	if ((rdev->flags & RADEON_IS_PCI) &&
 	    (rdev->family <= CHIP_RS740))
-		dma_bits = 32;
-#ifdef CONFIG_PPC64
-	if (rdev->family == CHIP_CEDAR)
-		dma_bits = 32;
-#endif
+		rdev->need_dma32 = true;
 
-	r = dma_set_mask_and_coherent(&rdev->pdev->dev, DMA_BIT_MASK(dma_bits));
+	dma_bits = rdev->need_dma32 ? 32 : 40;
+	r = pci_set_dma_mask(rdev->pdev, DMA_BIT_MASK(dma_bits));
 	if (r) {
+		rdev->need_dma32 = true;
+		dma_bits = 32;
 		pr_warn("radeon: No suitable DMA available\n");
-		return r;
 	}
-	rdev->need_swiotlb = drm_need_swiotlb(dma_bits);
+	r = pci_set_consistent_dma_mask(rdev->pdev, DMA_BIT_MASK(dma_bits));
+	if (r) {
+		pci_set_consistent_dma_mask(rdev->pdev, DMA_BIT_MASK(32));
+		pr_warn("radeon: No coherent DMA available\n");
+	}
 
 	/* Registers mapping */
 	/* TODO: block userspace mapping of io register */
@@ -1551,8 +1574,11 @@ void radeon_device_fini(struct radeon_device *rdev)
 /*
  * Suspend & resume.
  */
-/*
+/**
  * radeon_suspend_kms - initiate device suspend
+ *
+ * @pdev: drm dev pointer
+ * @state: suspend state
  *
  * Puts the hw in the suspend state (all asics).
  * Returns 0 for success or an error on failure.
@@ -1587,7 +1613,7 @@ int radeon_suspend_kms(struct drm_device *dev, bool suspend,
 	/* unpin the front buffers and cursors */
 	list_for_each_entry(crtc, &dev->mode_config.crtc_list, head) {
 		struct radeon_crtc *radeon_crtc = to_radeon_crtc(crtc);
-		struct drm_framebuffer *fb = crtc->primary->fb;
+		struct radeon_framebuffer *rfb = to_radeon_framebuffer(crtc->primary->fb);
 		struct radeon_bo *robj;
 
 		if (radeon_crtc->cursor_bo) {
@@ -1599,10 +1625,10 @@ int radeon_suspend_kms(struct drm_device *dev, bool suspend,
 			}
 		}
 
-		if (fb == NULL || fb->obj[0] == NULL) {
+		if (rfb == NULL || rfb->obj == NULL) {
 			continue;
 		}
-		robj = gem_to_radeon_bo(fb->obj[0]);
+		robj = gem_to_radeon_bo(rfb->obj);
 		/* don't unpin kernel fb objects */
 		if (!radeon_fbdev_robj_is_fb(rdev, robj)) {
 			r = radeon_bo_reserve(robj, false);
@@ -1654,8 +1680,10 @@ int radeon_suspend_kms(struct drm_device *dev, bool suspend,
 	return 0;
 }
 
-/*
+/**
  * radeon_resume_kms - initiate device resume
+ *
+ * @pdev: drm dev pointer
  *
  * Bring the hw back to operating state (all asics).
  * Returns 0 for success or an error on failure.

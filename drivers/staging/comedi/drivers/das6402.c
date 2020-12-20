@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * das6402.c
  * Comedi driver for DAS6402 compatible boards
@@ -6,6 +5,16 @@
  *
  * Rewrite of an experimental driver by:
  * Copyright (C) 1999 Oystein Svendsen <svendsen@pvv.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  */
 
 /*
@@ -279,7 +288,7 @@ static int das6402_ai_check_chanlist(struct comedi_device *dev,
 
 		if (aref0 == AREF_DIFF && chan > (s->n_chan / 2)) {
 			dev_dbg(dev->class_dev,
-				"chanlist differential channel too large\n");
+				"chanlist differential channel to large\n");
 			return -EINVAL;
 		}
 	}

@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
 /*
  * mm/truncate.c - code for taking down pages from address_spaces
  *
@@ -34,21 +33,24 @@
 static inline void __clear_shadow_entry(struct address_space *mapping,
 				pgoff_t index, void *entry)
 {
-	XA_STATE(xas, &mapping->i_pages, index);
+	struct radix_tree_node *node;
+	void **slot;
 
-	xas_set_update(&xas, workingset_update_node);
-	if (xas_load(&xas) != entry)
+	if (!__radix_tree_lookup(&mapping->page_tree, index, &node, &slot))
 		return;
-	xas_store(&xas, NULL);
+	if (*slot != entry)
+		return;
+	__radix_tree_replace(&mapping->page_tree, node, slot, NULL,
+			     workingset_update_node);
 	mapping->nrexceptional--;
 }
 
 static void clear_shadow_entry(struct address_space *mapping, pgoff_t index,
 			       void *entry)
 {
-	xa_lock_irq(&mapping->i_pages);
+	spin_lock_irq(&mapping->tree_lock);
 	__clear_shadow_entry(mapping, index, entry);
-	xa_unlock_irq(&mapping->i_pages);
+	spin_unlock_irq(&mapping->tree_lock);
 }
 
 /*
@@ -68,7 +70,7 @@ static void truncate_exceptional_pvec_entries(struct address_space *mapping,
 		return;
 
 	for (j = 0; j < pagevec_count(pvec); j++)
-		if (xa_is_value(pvec->pages[j]))
+		if (radix_tree_exceptional_entry(pvec->pages[j]))
 			break;
 
 	if (j == pagevec_count(pvec))
@@ -77,13 +79,13 @@ static void truncate_exceptional_pvec_entries(struct address_space *mapping,
 	dax = dax_mapping(mapping);
 	lock = !dax && indices[j] < end;
 	if (lock)
-		xa_lock_irq(&mapping->i_pages);
+		spin_lock_irq(&mapping->tree_lock);
 
 	for (i = j; i < pagevec_count(pvec); i++) {
 		struct page *page = pvec->pages[i];
 		pgoff_t index = indices[i];
 
-		if (!xa_is_value(page)) {
+		if (!radix_tree_exceptional_entry(page)) {
 			pvec->pages[j++] = page;
 			continue;
 		}
@@ -100,7 +102,7 @@ static void truncate_exceptional_pvec_entries(struct address_space *mapping,
 	}
 
 	if (lock)
-		xa_unlock_irq(&mapping->i_pages);
+		spin_unlock_irq(&mapping->tree_lock);
 	pvec->nr = j;
 }
 
@@ -168,7 +170,7 @@ void do_invalidatepage(struct page *page, unsigned int offset,
  * becomes orphaned.  It will be left on the LRU and may even be mapped into
  * user pagetables if we're racing with filemap_fault().
  *
- * We need to bail out if page->mapping is no longer equal to the original
+ * We need to bale out if page->mapping is no longer equal to the original
  * mapping.  This happens a) when the VM reclaimed the page while we waited on
  * its lock, b) when a concurrent invalidate_mapping_pages got there first and
  * c) when tmpfs swizzles a page between a tmpfs inode and swapper_space.
@@ -177,12 +179,16 @@ static void
 truncate_cleanup_page(struct address_space *mapping, struct page *page)
 {
 	if (page_mapped(page)) {
-		unsigned int nr = thp_nr_pages(page);
-		unmap_mapping_pages(mapping, page->index, nr, false);
+		loff_t holelen;
+
+		holelen = PageTransHuge(page) ? HPAGE_PMD_SIZE : PAGE_SIZE;
+		unmap_mapping_range(mapping,
+				   (loff_t)page->index << PAGE_SHIFT,
+				   holelen, 0);
 	}
 
 	if (page_has_private(page))
-		do_invalidatepage(page, 0, thp_size(page));
+		do_invalidatepage(page, 0, PAGE_SIZE);
 
 	/*
 	 * Some filesystems seem to re-dirty the page even after
@@ -345,7 +351,7 @@ void truncate_inode_pages_range(struct address_space *mapping,
 			if (index >= end)
 				break;
 
-			if (xa_is_value(page))
+			if (radix_tree_exceptional_entry(page))
 				continue;
 
 			if (!trylock_page(page))
@@ -440,7 +446,7 @@ void truncate_inode_pages_range(struct address_space *mapping,
 				break;
 			}
 
-			if (xa_is_value(page))
+			if (radix_tree_exceptional_entry(page))
 				continue;
 
 			lock_page(page);
@@ -516,20 +522,29 @@ void truncate_inode_pages_final(struct address_space *mapping)
 		 * modification that does not see AS_EXITING is
 		 * completed before starting the final truncate.
 		 */
-		xa_lock_irq(&mapping->i_pages);
-		xa_unlock_irq(&mapping->i_pages);
-	}
+		spin_lock_irq(&mapping->tree_lock);
+		spin_unlock_irq(&mapping->tree_lock);
 
-	/*
-	 * Cleancache needs notification even if there are no pages or shadow
-	 * entries.
-	 */
-	truncate_inode_pages(mapping, 0);
+		truncate_inode_pages(mapping, 0);
+	}
 }
 EXPORT_SYMBOL(truncate_inode_pages_final);
 
-static unsigned long __invalidate_mapping_pages(struct address_space *mapping,
-		pgoff_t start, pgoff_t end, unsigned long *nr_pagevec)
+/**
+ * invalidate_mapping_pages - Invalidate all the unlocked pages of one inode
+ * @mapping: the address_space which holds the pages to invalidate
+ * @start: the offset 'from' which to invalidate
+ * @end: the offset 'to' which to invalidate (inclusive)
+ *
+ * This function only removes the unlocked pages, if you want to
+ * remove all the pages of one inode, you must call truncate_inode_pages.
+ *
+ * invalidate_mapping_pages() will not block on IO activity. It will not
+ * invalidate pages which are dirty, locked, under writeback or mapped into
+ * pagetables.
+ */
+unsigned long invalidate_mapping_pages(struct address_space *mapping,
+		pgoff_t start, pgoff_t end)
 {
 	pgoff_t indices[PAGEVEC_SIZE];
 	struct pagevec pvec;
@@ -550,7 +565,7 @@ static unsigned long __invalidate_mapping_pages(struct address_space *mapping,
 			if (index > end)
 				break;
 
-			if (xa_is_value(page)) {
+			if (radix_tree_exceptional_entry(page)) {
 				invalidate_exceptional_entry(mapping, index,
 							     page);
 				continue;
@@ -577,16 +592,6 @@ static unsigned long __invalidate_mapping_pages(struct address_space *mapping,
 					unlock_page(page);
 					continue;
 				}
-
-				/* Take a pin outside pagevec */
-				get_page(page);
-
-				/*
-				 * Drop extra pins before trying to invalidate
-				 * the huge page.
-				 */
-				pagevec_remove_exceptionals(&pvec);
-				pagevec_release(&pvec);
 			}
 
 			ret = invalidate_inode_page(page);
@@ -595,15 +600,8 @@ static unsigned long __invalidate_mapping_pages(struct address_space *mapping,
 			 * Invalidation is a hint that the page is no longer
 			 * of interest and try to speed up its reclaim.
 			 */
-			if (!ret) {
+			if (!ret)
 				deactivate_file_page(page);
-				/* It is likely on the pagevec of a remote CPU */
-				if (nr_pagevec)
-					(*nr_pagevec)++;
-			}
-
-			if (PageTransHuge(page))
-				put_page(page);
 			count += ret;
 		}
 		pagevec_remove_exceptionals(&pvec);
@@ -613,45 +611,7 @@ static unsigned long __invalidate_mapping_pages(struct address_space *mapping,
 	}
 	return count;
 }
-
-/**
- * invalidate_mapping_pages - Invalidate all the unlocked pages of one inode
- * @mapping: the address_space which holds the pages to invalidate
- * @start: the offset 'from' which to invalidate
- * @end: the offset 'to' which to invalidate (inclusive)
- *
- * This function only removes the unlocked pages, if you want to
- * remove all the pages of one inode, you must call truncate_inode_pages.
- *
- * invalidate_mapping_pages() will not block on IO activity. It will not
- * invalidate pages which are dirty, locked, under writeback or mapped into
- * pagetables.
- *
- * Return: the number of the pages that were invalidated
- */
-unsigned long invalidate_mapping_pages(struct address_space *mapping,
-		pgoff_t start, pgoff_t end)
-{
-	return __invalidate_mapping_pages(mapping, start, end, NULL);
-}
 EXPORT_SYMBOL(invalidate_mapping_pages);
-
-/**
- * invalidate_mapping_pagevec - Invalidate all the unlocked pages of one inode
- * @mapping: the address_space which holds the pages to invalidate
- * @start: the offset 'from' which to invalidate
- * @end: the offset 'to' which to invalidate (inclusive)
- * @nr_pagevec: invalidate failed page number for caller
- *
- * This helper is similar to invalidate_mapping_pages(), except that it accounts
- * for pages that are likely on a pagevec and counts them in @nr_pagevec, which
- * will be used by the caller.
- */
-void invalidate_mapping_pagevec(struct address_space *mapping,
-		pgoff_t start, pgoff_t end, unsigned long *nr_pagevec)
-{
-	__invalidate_mapping_pages(mapping, start, end, nr_pagevec);
-}
 
 /*
  * This is like invalidate_complete_page(), except it ignores the page's
@@ -671,13 +631,13 @@ invalidate_complete_page2(struct address_space *mapping, struct page *page)
 	if (page_has_private(page) && !try_to_release_page(page, GFP_KERNEL))
 		return 0;
 
-	xa_lock_irqsave(&mapping->i_pages, flags);
+	spin_lock_irqsave(&mapping->tree_lock, flags);
 	if (PageDirty(page))
 		goto failed;
 
 	BUG_ON(page_has_private(page));
 	__delete_from_page_cache(page, NULL);
-	xa_unlock_irqrestore(&mapping->i_pages, flags);
+	spin_unlock_irqrestore(&mapping->tree_lock, flags);
 
 	if (mapping->a_ops->freepage)
 		mapping->a_ops->freepage(page);
@@ -685,7 +645,7 @@ invalidate_complete_page2(struct address_space *mapping, struct page *page)
 	put_page(page);	/* pagecache ref */
 	return 1;
 failed:
-	xa_unlock_irqrestore(&mapping->i_pages, flags);
+	spin_unlock_irqrestore(&mapping->tree_lock, flags);
 	return 0;
 }
 
@@ -707,7 +667,7 @@ static int do_launder_page(struct address_space *mapping, struct page *page)
  * Any pages which are found to be mapped into pagetables are unmapped prior to
  * invalidation.
  *
- * Return: -EBUSY if any pages could not be invalidated.
+ * Returns -EBUSY if any pages could not be invalidated.
  */
 int invalidate_inode_pages2_range(struct address_space *mapping,
 				  pgoff_t start, pgoff_t end)
@@ -736,7 +696,7 @@ int invalidate_inode_pages2_range(struct address_space *mapping,
 			if (index > end)
 				break;
 
-			if (xa_is_value(page)) {
+			if (radix_tree_exceptional_entry(page)) {
 				if (!invalidate_exceptional_entry2(mapping,
 								   index, page))
 					ret = -EBUSY;
@@ -755,15 +715,19 @@ int invalidate_inode_pages2_range(struct address_space *mapping,
 					/*
 					 * Zap the rest of the file in one hit.
 					 */
-					unmap_mapping_pages(mapping, index,
-						(1 + end - index), false);
+					unmap_mapping_range(mapping,
+					   (loff_t)index << PAGE_SHIFT,
+					   (loff_t)(1 + end - index)
+							 << PAGE_SHIFT,
+							 0);
 					did_range_unmap = 1;
 				} else {
 					/*
 					 * Just zap this page
 					 */
-					unmap_mapping_pages(mapping, index,
-								1, false);
+					unmap_mapping_range(mapping,
+					   (loff_t)index << PAGE_SHIFT,
+					   PAGE_SIZE, 0);
 				}
 			}
 			BUG_ON(page_mapped(page));
@@ -782,14 +746,15 @@ int invalidate_inode_pages2_range(struct address_space *mapping,
 		index++;
 	}
 	/*
-	 * For DAX we invalidate page tables after invalidating page cache.  We
+	 * For DAX we invalidate page tables after invalidating radix tree.  We
 	 * could invalidate page tables while invalidating each entry however
 	 * that would be expensive. And doing range unmapping before doesn't
-	 * work as we have no cheap way to find whether page cache entry didn't
+	 * work as we have no cheap way to find whether radix tree entry didn't
 	 * get remapped later.
 	 */
 	if (dax_mapping(mapping)) {
-		unmap_mapping_pages(mapping, start, end - start + 1, false);
+		unmap_mapping_range(mapping, (loff_t)start << PAGE_SHIFT,
+				    (loff_t)(end - start + 1) << PAGE_SHIFT, 0);
 	}
 out:
 	cleancache_invalidate_inode(mapping);
@@ -804,7 +769,7 @@ EXPORT_SYMBOL_GPL(invalidate_inode_pages2_range);
  * Any pages which are found to be mapped into pagetables are unmapped prior to
  * invalidation.
  *
- * Return: -EBUSY if any pages could not be invalidated.
+ * Returns -EBUSY if any pages could not be invalidated.
  */
 int invalidate_inode_pages2(struct address_space *mapping)
 {

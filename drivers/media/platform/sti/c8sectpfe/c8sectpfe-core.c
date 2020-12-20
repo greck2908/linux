@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * c8sectpfe-core.c - C8SECTPFE STi DVB driver
  *
@@ -7,6 +6,10 @@
  *   Author:Peter Bennett <peter.bennett@st.com>
  *	    Peter Griffin <peter.griffin@linaro.org>
  *
+ *	This program is free software; you can redistribute it and/or
+ *	modify it under the terms of the GNU General Public License as
+ *	published by the Free Software Foundation; either version 2 of
+ *	the License, or (at your option) any later version.
  */
 #include <linux/atomic.h>
 #include <linux/clk.h>
@@ -35,10 +38,10 @@
 #include "c8sectpfe-core.h"
 #include "c8sectpfe-common.h"
 #include "c8sectpfe-debugfs.h"
-#include <media/dmxdev.h>
-#include <media/dvb_demux.h>
-#include <media/dvb_frontend.h>
-#include <media/dvb_net.h>
+#include "dmxdev.h"
+#include "dvb_demux.h"
+#include "dvb_frontend.h"
+#include "dvb_net.h"
 
 #define FIRMWARE_MEMDMA "pti_memdma_h407.elf"
 MODULE_FIRMWARE(FIRMWARE_MEMDMA);
@@ -77,18 +80,16 @@ static void c8sectpfe_timer_interrupt(struct timer_list *t)
 	add_timer(&fei->timer);
 }
 
-static void channel_swdemux_tsklet(struct tasklet_struct *t)
+static void channel_swdemux_tsklet(unsigned long data)
 {
-	struct channel_info *channel = from_tasklet(channel, t, tsklet);
-	struct c8sectpfei *fei;
+	struct channel_info *channel = (struct channel_info *)data;
+	struct c8sectpfei *fei = channel->fei;
 	unsigned long wp, rp;
 	int pos, num_packets, n, size;
 	u8 *buf;
 
 	if (unlikely(!channel || !channel->irec))
 		return;
-
-	fei = channel->fei;
 
 	wp = readl(channel->irec + DMA_PRDS_BUSWP_TP(0));
 	rp = readl(channel->irec + DMA_PRDS_BUSRP_TP(0));
@@ -208,7 +209,8 @@ static int c8sectpfe_start_feed(struct dvb_demux_feed *dvbdmxfeed)
 
 		dev_dbg(fei->dev, "Starting channel=%p\n", channel);
 
-		tasklet_setup(&channel->tsklet, channel_swdemux_tsklet);
+		tasklet_init(&channel->tsklet, channel_swdemux_tsklet,
+			     (unsigned long) channel);
 
 		/* Reset the internal inputblock sram pointers */
 		writel(channel->fifo,
@@ -637,7 +639,8 @@ static int configure_memdma_and_inputblock(struct c8sectpfei *fei,
 	writel(tsin->back_buffer_busaddr, tsin->irec + DMA_PRDS_BUSRP_TP(0));
 
 	/* initialize tasklet */
-	tasklet_setup(&tsin->tsklet, channel_swdemux_tsklet);
+	tasklet_init(&tsin->tsklet, channel_swdemux_tsklet,
+		(unsigned long) tsin);
 
 	return 0;
 
@@ -688,15 +691,19 @@ static int c8sectpfe_probe(struct platform_device *pdev)
 	if (IS_ERR(fei->sram))
 		return PTR_ERR(fei->sram);
 
-	fei->sram_size = resource_size(res);
+	fei->sram_size = res->end - res->start;
 
 	fei->idle_irq = platform_get_irq_byname(pdev, "c8sectpfe-idle-irq");
-	if (fei->idle_irq < 0)
+	if (fei->idle_irq < 0) {
+		dev_err(dev, "Can't get c8sectpfe-idle-irq\n");
 		return fei->idle_irq;
+	}
 
 	fei->error_irq = platform_get_irq_byname(pdev, "c8sectpfe-error-irq");
-	if (fei->error_irq < 0)
+	if (fei->error_irq < 0) {
+		dev_err(dev, "Can't get c8sectpfe-error-irq\n");
 		return fei->error_irq;
+	}
 
 	platform_set_drvdata(pdev, fei);
 
@@ -765,7 +772,7 @@ static int c8sectpfe_probe(struct platform_device *pdev)
 
 		if (!fei->channel_data[index]) {
 			ret = -ENOMEM;
-			goto err_node_put;
+			goto err_clk_disable;
 		}
 
 		tsin = fei->channel_data[index];
@@ -775,7 +782,7 @@ static int c8sectpfe_probe(struct platform_device *pdev)
 		ret = of_property_read_u32(child, "tsin-num", &tsin->tsin_id);
 		if (ret) {
 			dev_err(&pdev->dev, "No tsin_num found\n");
-			goto err_node_put;
+			goto err_clk_disable;
 		}
 
 		/* sanity check value */
@@ -784,7 +791,7 @@ static int c8sectpfe_probe(struct platform_device *pdev)
 				"tsin-num %d specified greater than number\n\tof input block hw in SoC! (%d)",
 				tsin->tsin_id, fei->hw_stats.num_ib);
 			ret = -EINVAL;
-			goto err_node_put;
+			goto err_clk_disable;
 		}
 
 		tsin->invert_ts_clk = of_property_read_bool(child,
@@ -800,14 +807,14 @@ static int c8sectpfe_probe(struct platform_device *pdev)
 					&tsin->dvb_card);
 		if (ret) {
 			dev_err(&pdev->dev, "No dvb-card found\n");
-			goto err_node_put;
+			goto err_clk_disable;
 		}
 
 		i2c_bus = of_parse_phandle(child, "i2c-bus", 0);
 		if (!i2c_bus) {
 			dev_err(&pdev->dev, "No i2c-bus found\n");
 			ret = -ENODEV;
-			goto err_node_put;
+			goto err_clk_disable;
 		}
 		tsin->i2c_adapter =
 			of_find_i2c_adapter_by_node(i2c_bus);
@@ -815,7 +822,7 @@ static int c8sectpfe_probe(struct platform_device *pdev)
 			dev_err(&pdev->dev, "No i2c adapter found\n");
 			of_node_put(i2c_bus);
 			ret = -ENODEV;
-			goto err_node_put;
+			goto err_clk_disable;
 		}
 		of_node_put(i2c_bus);
 
@@ -826,7 +833,7 @@ static int c8sectpfe_probe(struct platform_device *pdev)
 			dev_err(dev,
 				"reset gpio for tsin%d not valid (gpio=%d)\n",
 				tsin->tsin_id, tsin->rst_gpio);
-			goto err_node_put;
+			goto err_clk_disable;
 		}
 
 		ret = devm_gpio_request_one(dev, tsin->rst_gpio,
@@ -834,7 +841,7 @@ static int c8sectpfe_probe(struct platform_device *pdev)
 		if (ret && ret != -EBUSY) {
 			dev_err(dev, "Can't request tsin%d reset gpio\n"
 				, fei->channel_data[index]->tsin_id);
-			goto err_node_put;
+			goto err_clk_disable;
 		}
 
 		if (!ret) {
@@ -877,8 +884,6 @@ static int c8sectpfe_probe(struct platform_device *pdev)
 
 	return 0;
 
-err_node_put:
-	of_node_put(child);
 err_clk_disable:
 	clk_disable_unprepare(fei->c8sectpfeclk);
 	return ret;
@@ -1034,8 +1039,9 @@ static void load_imem_segment(struct c8sectpfei *fei, Elf32_Phdr *phdr,
 
 	dev_dbg(fei->dev,
 		"Loading IMEM segment %d 0x%08x\n\t (0x%x bytes) -> 0x%p (0x%x bytes)\n",
-		seg_num, phdr->p_paddr, phdr->p_filesz, dest,
-		phdr->p_memsz + phdr->p_memsz / 3);
+seg_num,
+		phdr->p_paddr, phdr->p_filesz,
+		dest, phdr->p_memsz + phdr->p_memsz / 3);
 
 	for (i = 0; i < phdr->p_filesz; i++) {
 

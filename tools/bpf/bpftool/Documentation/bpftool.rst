@@ -16,25 +16,17 @@ SYNOPSIS
 
 	**bpftool** **version**
 
-	*OBJECT* := { **map** | **program** | **cgroup** | **perf** | **net** | **feature** }
+	*OBJECT* := { **map** | **program** }
 
 	*OPTIONS* := { { **-V** | **--version** } | { **-h** | **--help** }
 	| { **-j** | **--json** } [{ **-p** | **--pretty** }] }
 
 	*MAP-COMMANDS* :=
-	{ **show** | **list** | **create** | **dump** | **update** | **lookup** | **getnext**
-	| **delete** | **pin** | **event_pipe** | **help** }
+	{ **show** | **dump** | **update** | **lookup** | **getnext** | **delete**
+	| **pin** | **help** }
 
-	*PROG-COMMANDS* := { **show** | **list** | **dump jited** | **dump xlated** | **pin**
-	| **load** | **attach** | **detach** | **help** }
-
-	*CGROUP-COMMANDS* := { **show** | **list** | **attach** | **detach** | **help** }
-
-	*PERF-COMMANDS* := { **show** | **list** | **help** }
-
-	*NET-COMMANDS* := { **show** | **list** | **help** }
-
-	*FEATURE-COMMANDS* := { **probe** | **help** }
+	*PROG-COMMANDS* := { **show** | **dump jited** | **dump xlated** | **pin**
+	| **help** }
 
 DESCRIPTION
 ===========
@@ -46,11 +38,19 @@ DESCRIPTION
 
 OPTIONS
 =======
-	.. include:: common_options.rst
+	-h, --help
+		  Print short help message (similar to **bpftool help**).
 
-	-m, --mapcompat
-		  Allow loading maps with unknown map definitions.
+	-v, --version
+		  Print version number (similar to **bpftool version**).
 
-	-n, --nomount
-		  Do not automatically attempt to mount any virtual file system
-		  (such as tracefs or BPF virtual file system) when necessary.
+	-j, --json
+		  Generate JSON output. For commands that cannot produce JSON, this
+		  option has no effect.
+
+	-p, --pretty
+		  Generate human-readable JSON output. Implies **-j**.
+
+SEE ALSO
+========
+	**bpftool-map**\ (8), **bpftool-prog**\ (8)

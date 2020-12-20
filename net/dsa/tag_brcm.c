@@ -1,8 +1,12 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * Broadcom tag support
  *
  * Copyright (C) 2014 Broadcom Corporation
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  */
 
 #include <linux/etherdevice.h>
@@ -55,9 +59,6 @@
 #define BRCM_EG_TC_MASK		0x7
 #define BRCM_EG_PID_MASK	0x1f
 
-#if IS_ENABLED(CONFIG_NET_DSA_TAG_BRCM) || \
-	IS_ENABLED(CONFIG_NET_DSA_TAG_BRCM_PREPEND)
-
 static struct sk_buff *brcm_tag_xmit_ll(struct sk_buff *skb,
 					struct net_device *dev,
 					unsigned int offset)
@@ -66,16 +67,7 @@ static struct sk_buff *brcm_tag_xmit_ll(struct sk_buff *skb,
 	u16 queue = skb_get_queue_mapping(skb);
 	u8 *brcm_tag;
 
-	/* The Ethernet switch we are interfaced with needs packets to be at
-	 * least 64 bytes (including FCS) otherwise they will be discarded when
-	 * they enter the switch port logic. When Broadcom tags are enabled, we
-	 * need to make sure that packets are at least 68 bytes
-	 * (including FCS and tag) because the length verification is done after
-	 * the Broadcom tag is stripped off the ingress packet.
-	 *
-	 * Let dsa_slave_xmit() free the SKB
-	 */
-	if (__skb_put_padto(skb, ETH_ZLEN + BRCM_TAG_LEN, false))
+	if (skb_cow_head(skb, BRCM_TAG_LEN) < 0)
 		return NULL;
 
 	skb_push(skb, BRCM_TAG_LEN);
@@ -104,18 +96,6 @@ static struct sk_buff *brcm_tag_xmit_ll(struct sk_buff *skb,
 	return skb;
 }
 
-/* Frames with this tag have one of these two layouts:
- * -----------------------------------
- * | MAC DA | MAC SA | 4b tag | Type | DSA_TAG_PROTO_BRCM
- * -----------------------------------
- * -----------------------------------
- * | 4b tag | MAC DA | MAC SA | Type | DSA_TAG_PROTO_BRCM_PREPEND
- * -----------------------------------
- * In both cases, at receive time, skb->data points 2 bytes before the actual
- * Ethernet type field and we have an offset of 4bytes between where skb->data
- * and where the payload starts. So the same low-level receive function can be
- * used.
- */
 static struct sk_buff *brcm_tag_rcv_ll(struct sk_buff *skb,
 				       struct net_device *dev,
 				       struct packet_type *pt,
@@ -149,13 +129,10 @@ static struct sk_buff *brcm_tag_rcv_ll(struct sk_buff *skb,
 	/* Remove Broadcom tag and update checksum */
 	skb_pull_rcsum(skb, BRCM_TAG_LEN);
 
-	skb->offload_fwd_mark = 1;
-
 	return skb;
 }
-#endif
 
-#if IS_ENABLED(CONFIG_NET_DSA_TAG_BRCM)
+#ifdef CONFIG_NET_DSA_TAG_BRCM
 static struct sk_buff *brcm_tag_xmit(struct sk_buff *skb,
 				     struct net_device *dev)
 {
@@ -182,19 +159,13 @@ static struct sk_buff *brcm_tag_rcv(struct sk_buff *skb, struct net_device *dev,
 	return nskb;
 }
 
-static const struct dsa_device_ops brcm_netdev_ops = {
-	.name	= "brcm",
-	.proto	= DSA_TAG_PROTO_BRCM,
+const struct dsa_device_ops brcm_netdev_ops = {
 	.xmit	= brcm_tag_xmit,
 	.rcv	= brcm_tag_rcv,
-	.overhead = BRCM_TAG_LEN,
 };
-
-DSA_TAG_DRIVER(brcm_netdev_ops);
-MODULE_ALIAS_DSA_TAG_DRIVER(DSA_TAG_PROTO_BRCM);
 #endif
 
-#if IS_ENABLED(CONFIG_NET_DSA_TAG_BRCM_PREPEND)
+#ifdef CONFIG_NET_DSA_TAG_BRCM_PREPEND
 static struct sk_buff *brcm_tag_xmit_prepend(struct sk_buff *skb,
 					     struct net_device *dev)
 {
@@ -210,27 +181,8 @@ static struct sk_buff *brcm_tag_rcv_prepend(struct sk_buff *skb,
 	return brcm_tag_rcv_ll(skb, dev, pt, ETH_HLEN);
 }
 
-static const struct dsa_device_ops brcm_prepend_netdev_ops = {
-	.name	= "brcm-prepend",
-	.proto	= DSA_TAG_PROTO_BRCM_PREPEND,
+const struct dsa_device_ops brcm_prepend_netdev_ops = {
 	.xmit	= brcm_tag_xmit_prepend,
 	.rcv	= brcm_tag_rcv_prepend,
-	.overhead = BRCM_TAG_LEN,
 };
-
-DSA_TAG_DRIVER(brcm_prepend_netdev_ops);
-MODULE_ALIAS_DSA_TAG_DRIVER(DSA_TAG_PROTO_BRCM_PREPEND);
 #endif
-
-static struct dsa_tag_driver *dsa_tag_driver_array[] =	{
-#if IS_ENABLED(CONFIG_NET_DSA_TAG_BRCM)
-	&DSA_TAG_DRIVER_NAME(brcm_netdev_ops),
-#endif
-#if IS_ENABLED(CONFIG_NET_DSA_TAG_BRCM_PREPEND)
-	&DSA_TAG_DRIVER_NAME(brcm_prepend_netdev_ops),
-#endif
-};
-
-module_dsa_tag_drivers(dsa_tag_driver_array);
-
-MODULE_LICENSE("GPL");

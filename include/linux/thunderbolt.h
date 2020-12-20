@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Thunderbolt service API
  *
@@ -6,6 +5,10 @@
  * Copyright (C) 2017, Intel Corporation
  * Authors: Michael Jamet <michael.jamet@intel.com>
  *          Mika Westerberg <mika.westerberg@linux.intel.com>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 
 #ifndef THUNDERBOLT_H_
@@ -42,16 +45,12 @@ enum tb_cfg_pkg_type {
  * @TB_SECURITY_USER: User approval required at minimum
  * @TB_SECURITY_SECURE: One time saved key required at minimum
  * @TB_SECURITY_DPONLY: Only tunnel Display port (and USB)
- * @TB_SECURITY_USBONLY: Only tunnel USB controller of the connected
- *			 Thunderbolt dock (and Display Port). All PCIe
- *			 links downstream of the dock are removed.
  */
 enum tb_security_level {
 	TB_SECURITY_NONE,
 	TB_SECURITY_USER,
 	TB_SECURITY_SECURE,
 	TB_SECURITY_DPONLY,
-	TB_SECURITY_USBONLY,
 };
 
 /**
@@ -66,7 +65,6 @@ enum tb_security_level {
  * @cm_ops: Connection manager specific operations vector
  * @index: Linux assigned domain number
  * @security_level: Current security level
- * @nboot_acl: Number of boot ACLs the domain supports
  * @privdata: Private connection manager specific data
  */
 struct tb {
@@ -79,8 +77,7 @@ struct tb {
 	const struct tb_cm_ops *cm_ops;
 	int index;
 	enum tb_security_level security_level;
-	size_t nboot_acl;
-	unsigned long privdata[];
+	unsigned long privdata[0];
 };
 
 extern struct bus_type tb_bus_type;
@@ -179,12 +176,8 @@ void tb_unregister_property_dir(const char *key, struct tb_property_dir *dir);
  * @lock: Lock to serialize access to the following fields of this structure
  * @vendor_name: Name of the vendor (or %NULL if not known)
  * @device_name: Name of the device (or %NULL if not known)
- * @link_speed: Speed of the link in Gb/s
- * @link_width: Width of the link (1 or 2)
  * @is_unplugged: The XDomain is unplugged
  * @resume: The XDomain is being resumed
- * @needs_uuid: If the XDomain does not have @remote_uuid it will be
- *		queried first
  * @transmit_path: HopID which the remote end expects us to transmit
  * @transmit_ring: Local ring (hop) where outgoing packets are pushed
  * @receive_path: HopID which we expect the remote end to transmit
@@ -193,9 +186,6 @@ void tb_unregister_property_dir(const char *key, struct tb_property_dir *dir);
  * @properties: Properties exported by the remote domain
  * @property_block_gen: Generation of @properties
  * @properties_lock: Lock protecting @properties.
- * @get_uuid_work: Work used to retrieve @remote_uuid
- * @uuid_retries: Number of times left @remote_uuid is requested before
- *		  giving up
  * @get_properties_work: Work used to get remote domain properties
  * @properties_retries: Number of times left to read properties
  * @properties_changed_work: Work used to notify the remote domain that
@@ -225,11 +215,8 @@ struct tb_xdomain {
 	struct mutex lock;
 	const char *vendor_name;
 	const char *device_name;
-	unsigned int link_speed;
-	unsigned int link_width;
 	bool is_unplugged;
 	bool resume;
-	bool needs_uuid;
 	u16 transmit_path;
 	u16 transmit_ring;
 	u16 receive_path;
@@ -237,8 +224,6 @@ struct tb_xdomain {
 	struct ida service_ids;
 	struct tb_property_dir *properties;
 	u32 property_block_gen;
-	struct delayed_work get_uuid_work;
-	int uuid_retries;
 	struct delayed_work get_properties_work;
 	int properties_retries;
 	struct delayed_work properties_changed_work;
@@ -247,14 +232,11 @@ struct tb_xdomain {
 	u8 depth;
 };
 
-int tb_xdomain_lane_bonding_enable(struct tb_xdomain *xd);
-void tb_xdomain_lane_bonding_disable(struct tb_xdomain *xd);
 int tb_xdomain_enable_paths(struct tb_xdomain *xd, u16 transmit_path,
 			    u16 transmit_ring, u16 receive_path,
 			    u16 receive_ring);
 int tb_xdomain_disable_paths(struct tb_xdomain *xd);
 struct tb_xdomain *tb_xdomain_find_by_uuid(struct tb *tb, const uuid_t *uuid);
-struct tb_xdomain *tb_xdomain_find_by_route(struct tb *tb, u64 route);
 
 static inline struct tb_xdomain *
 tb_xdomain_find_by_uuid_locked(struct tb *tb, const uuid_t *uuid)
@@ -263,18 +245,6 @@ tb_xdomain_find_by_uuid_locked(struct tb *tb, const uuid_t *uuid)
 
 	mutex_lock(&tb->lock);
 	xd = tb_xdomain_find_by_uuid(tb, uuid);
-	mutex_unlock(&tb->lock);
-
-	return xd;
-}
-
-static inline struct tb_xdomain *
-tb_xdomain_find_by_route_locked(struct tb *tb, u64 route)
-{
-	struct tb_xdomain *xd;
-
-	mutex_lock(&tb->lock);
-	xd = tb_xdomain_find_by_route(tb, route);
 	mutex_unlock(&tb->lock);
 
 	return xd;
@@ -350,9 +320,6 @@ void tb_unregister_protocol_handler(struct tb_protocol_handler *handler);
  * @prtcvers: Protocol version from the properties directory
  * @prtcrevs: Protocol software revision from the properties directory
  * @prtcstns: Protocol settings mask from the properties directory
- * @debugfs_dir: Pointer to the service debugfs directory. Always created
- *		 when debugfs is enabled. Can be used by service drivers to
- *		 add their own entries under the service.
  *
  * Each domain exposes set of services it supports as collection of
  * properties. For each service there will be one corresponding
@@ -366,7 +333,6 @@ struct tb_service {
 	u32 prtcvers;
 	u32 prtcrevs;
 	u32 prtcstns;
-	struct dentry *debugfs_dir;
 };
 
 static inline struct tb_service *tb_service_get(struct tb_service *svc)
@@ -439,7 +405,6 @@ static inline struct tb_xdomain *tb_service_parent(struct tb_service *svc)
  * @lock: Must be held during ring creation/destruction. Is acquired by
  *	  interrupt_work when dispatching interrupts to individual rings.
  * @pdev: Pointer to the PCI device
- * @ops: NHI specific optional ops
  * @iobase: MMIO space of the NHI
  * @tx_rings: All Tx rings available on this host controller
  * @rx_rings: All Rx rings available on this host controller
@@ -453,7 +418,6 @@ static inline struct tb_xdomain *tb_service_parent(struct tb_service *svc)
 struct tb_nhi {
 	spinlock_t lock;
 	struct pci_dev *pdev;
-	const struct tb_nhi_ops *ops;
 	void __iomem *iobase;
 	struct tb_ring **tx_rings;
 	struct tb_ring **rx_rings;
@@ -481,8 +445,6 @@ struct tb_nhi {
  * @irq: MSI-X irq number if the ring uses MSI-X. %0 otherwise.
  * @vector: MSI-X vector number the ring uses (only set if @irq is > 0)
  * @flags: Ring specific flags
- * @e2e_tx_hop: Transmit HopID when E2E is enabled. Only applicable to
- *		RX ring. For TX ring this should be set to %0.
  * @sof_mask: Bit mask used to detect start of frame PDF
  * @eof_mask: Bit mask used to detect end of frame PDF
  * @start_poll: Called when ring interrupt is triggered to start
@@ -506,7 +468,6 @@ struct tb_ring {
 	int irq;
 	u8 vector;
 	unsigned int flags;
-	int e2e_tx_hop;
 	u16 sof_mask;
 	u16 eof_mask;
 	void (*start_poll)(void *data);
@@ -567,8 +528,7 @@ struct ring_frame {
 struct tb_ring *tb_ring_alloc_tx(struct tb_nhi *nhi, int hop, int size,
 				 unsigned int flags);
 struct tb_ring *tb_ring_alloc_rx(struct tb_nhi *nhi, int hop, int size,
-				 unsigned int flags, int e2e_tx_hop,
-				 u16 sof_mask, u16 eof_mask,
+				 unsigned int flags, u16 sof_mask, u16 eof_mask,
 				 void (*start_poll)(void *), void *poll_data);
 void tb_ring_start(struct tb_ring *ring);
 void tb_ring_stop(struct tb_ring *ring);

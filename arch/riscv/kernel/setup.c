@@ -1,41 +1,45 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2009 Sunplus Core Technology Co., Ltd.
  *  Chen Liqin <liqin.chen@sunplusct.com>
  *  Lennox Wu <lennox.wu@sunplusct.com>
  * Copyright (C) 2012 Regents of the University of California
- * Copyright (C) 2020 FORTH-ICS/CARV
- *  Nick Kossifidis <mick@ics.forth.gr>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see the file COPYING, or write
+ * to the Free Software Foundation, Inc.,
  */
 
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/memblock.h>
 #include <linux/sched.h>
+#include <linux/initrd.h>
 #include <linux/console.h>
 #include <linux/screen_info.h>
 #include <linux/of_fdt.h>
 #include <linux/of_platform.h>
 #include <linux/sched/task.h>
-#include <linux/swiotlb.h>
-#include <linux/smp.h>
-#include <linux/efi.h>
 
-#include <asm/cpu_ops.h>
-#include <asm/early_ioremap.h>
 #include <asm/setup.h>
-#include <asm/set_memory.h>
 #include <asm/sections.h>
+#include <asm/pgtable.h>
+#include <asm/smp.h>
 #include <asm/sbi.h>
 #include <asm/tlbflush.h>
 #include <asm/thread_info.h>
-#include <asm/kasan.h>
-#include <asm/efi.h>
 
-#include "head.h"
-
-#if defined(CONFIG_DUMMY_CONSOLE) || defined(CONFIG_EFI)
-struct screen_info screen_info __section(".data") = {
+#ifdef CONFIG_DUMMY_CONSOLE
+struct screen_info screen_info = {
 	.orig_video_lines	= 30,
 	.orig_video_cols	= 80,
 	.orig_video_mode	= 0,
@@ -45,252 +49,203 @@ struct screen_info screen_info __section(".data") = {
 };
 #endif
 
-/*
- * The lucky hart to first increment this variable will boot the other cores.
- * This is used before the kernel initializes the BSS so it can't be in the
- * BSS.
- */
-atomic_t hart_lottery __section(".sdata");
-unsigned long boot_cpu_hartid;
-static DEFINE_PER_CPU(struct cpu, cpu_devices);
+#ifdef CONFIG_CMDLINE_BOOL
+static char __initdata builtin_cmdline[COMMAND_LINE_SIZE] = CONFIG_CMDLINE;
+#endif /* CONFIG_CMDLINE_BOOL */
 
-/*
- * Place kernel memory regions on the resource tree so that
- * kexec-tools can retrieve them from /proc/iomem. While there
- * also add "System RAM" regions for compatibility with other
- * archs, and the rest of the known regions for completeness.
- */
-static struct resource code_res = { .name = "Kernel code", };
-static struct resource data_res = { .name = "Kernel data", };
-static struct resource rodata_res = { .name = "Kernel rodata", };
-static struct resource bss_res = { .name = "Kernel bss", };
+unsigned long va_pa_offset;
+EXPORT_SYMBOL(va_pa_offset);
+unsigned long pfn_base;
+EXPORT_SYMBOL(pfn_base);
 
-static int __init add_resource(struct resource *parent,
-				struct resource *res)
+unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)] __page_aligned_bss;
+EXPORT_SYMBOL(empty_zero_page);
+
+/* The lucky hart to first increment this variable will boot the other cores */
+atomic_t hart_lottery;
+
+#ifdef CONFIG_BLK_DEV_INITRD
+static void __init setup_initrd(void)
 {
-	int ret = 0;
+	extern char __initramfs_start[];
+	extern unsigned long __initramfs_size;
+	unsigned long size;
 
-	ret = insert_resource(parent, res);
-	if (ret < 0) {
-		pr_err("Failed to add a %s resource at %llx\n",
-			res->name, (unsigned long long) res->start);
-		return ret;
+	if (__initramfs_size > 0) {
+		initrd_start = (unsigned long)(&__initramfs_start);
+		initrd_end = initrd_start + __initramfs_size;
 	}
 
-	return 1;
-}
-
-static int __init add_kernel_resources(struct resource *res)
-{
-	int ret = 0;
-
-	/*
-	 * The memory region of the kernel image is continuous and
-	 * was reserved on setup_bootmem, find it here and register
-	 * it as a resource, then register the various segments of
-	 * the image as child nodes
-	 */
-	if (!(res->start <= code_res.start && res->end >= data_res.end))
-		return 0;
-
-	res->name = "Kernel image";
-	res->flags = IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY;
-
-	/*
-	 * We removed a part of this region on setup_bootmem so
-	 * we need to expand the resource for the bss to fit in.
-	 */
-	res->end = bss_res.end;
-
-	ret = add_resource(&iomem_resource, res);
-	if (ret < 0)
-		return ret;
-
-	ret = add_resource(res, &code_res);
-	if (ret < 0)
-		return ret;
-
-	ret = add_resource(res, &rodata_res);
-	if (ret < 0)
-		return ret;
-
-	ret = add_resource(res, &data_res);
-	if (ret < 0)
-		return ret;
-
-	ret = add_resource(res, &bss_res);
-
-	return ret;
-}
-
-static void __init init_resources(void)
-{
-	struct memblock_region *region = NULL;
-	struct resource *res = NULL;
-	int ret = 0;
-
-	code_res.start = __pa_symbol(_text);
-	code_res.end = __pa_symbol(_etext) - 1;
-	code_res.flags = IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY;
-
-	rodata_res.start = __pa_symbol(__start_rodata);
-	rodata_res.end = __pa_symbol(__end_rodata) - 1;
-	rodata_res.flags = IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY;
-
-	data_res.start = __pa_symbol(_data);
-	data_res.end = __pa_symbol(_edata) - 1;
-	data_res.flags = IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY;
-
-	bss_res.start = __pa_symbol(__bss_start);
-	bss_res.end = __pa_symbol(__bss_stop) - 1;
-	bss_res.flags = IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY;
-
-	/*
-	 * Start by adding the reserved regions, if they overlap
-	 * with /memory regions, insert_resource later on will take
-	 * care of it.
-	 */
-	for_each_reserved_mem_region(region) {
-		res = memblock_alloc(sizeof(struct resource), SMP_CACHE_BYTES);
-		if (!res)
-			panic("%s: Failed to allocate %zu bytes\n", __func__,
-			      sizeof(struct resource));
-
-		res->name = "Reserved";
-		res->flags = IORESOURCE_MEM | IORESOURCE_BUSY;
-		res->start = __pfn_to_phys(memblock_region_reserved_base_pfn(region));
-		res->end = __pfn_to_phys(memblock_region_reserved_end_pfn(region)) - 1;
-
-		ret = add_kernel_resources(res);
-		if (ret < 0)
-			goto error;
-		else if (ret)
-			continue;
-
-		/*
-		 * Ignore any other reserved regions within
-		 * system memory.
-		 */
-		if (memblock_is_memory(res->start))
-			continue;
-
-		ret = add_resource(&iomem_resource, res);
-		if (ret < 0)
-			goto error;
+	if (initrd_start >= initrd_end) {
+		printk(KERN_INFO "initrd not found or empty");
+		goto disable;
+	}
+	if (__pa(initrd_end) > PFN_PHYS(max_low_pfn)) {
+		printk(KERN_ERR "initrd extends beyond end of memory");
+		goto disable;
 	}
 
-	/* Add /memory regions to the resource tree */
-	for_each_mem_region(region) {
-		res = memblock_alloc(sizeof(struct resource), SMP_CACHE_BYTES);
-		if (!res)
-			panic("%s: Failed to allocate %zu bytes\n", __func__,
-			      sizeof(struct resource));
+	size =  initrd_end - initrd_start;
+	memblock_reserve(__pa(initrd_start), size);
+	initrd_below_start_ok = 1;
 
-		if (unlikely(memblock_is_nomap(region))) {
-			res->name = "Reserved";
-			res->flags = IORESOURCE_MEM | IORESOURCE_BUSY;
-		} else {
-			res->name = "System RAM";
-			res->flags = IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY;
-		}
-
-		res->start = __pfn_to_phys(memblock_region_memory_base_pfn(region));
-		res->end = __pfn_to_phys(memblock_region_memory_end_pfn(region)) - 1;
-
-		ret = add_resource(&iomem_resource, res);
-		if (ret < 0)
-			goto error;
-	}
-
+	printk(KERN_INFO "Initial ramdisk at: 0x%p (%lu bytes)\n",
+		(void *)(initrd_start), size);
 	return;
+disable:
+	pr_cont(" - disabling initrd\n");
+	initrd_start = 0;
+	initrd_end = 0;
+}
+#endif /* CONFIG_BLK_DEV_INITRD */
 
- error:
-	memblock_free((phys_addr_t) res, sizeof(struct resource));
-	/* Better an empty resource tree than an inconsistent one */
-	release_child_resources(&iomem_resource);
+pgd_t swapper_pg_dir[PTRS_PER_PGD] __page_aligned_bss;
+pgd_t trampoline_pg_dir[PTRS_PER_PGD] __initdata __aligned(PAGE_SIZE);
+
+#ifndef __PAGETABLE_PMD_FOLDED
+#define NUM_SWAPPER_PMDS ((uintptr_t)-PAGE_OFFSET >> PGDIR_SHIFT)
+pmd_t swapper_pmd[PTRS_PER_PMD*((-PAGE_OFFSET)/PGDIR_SIZE)] __page_aligned_bss;
+pmd_t trampoline_pmd[PTRS_PER_PGD] __initdata __aligned(PAGE_SIZE);
+#endif
+
+asmlinkage void __init setup_vm(void)
+{
+	extern char _start;
+	uintptr_t i;
+	uintptr_t pa = (uintptr_t) &_start;
+	pgprot_t prot = __pgprot(pgprot_val(PAGE_KERNEL) | _PAGE_EXEC);
+
+	va_pa_offset = PAGE_OFFSET - pa;
+	pfn_base = PFN_DOWN(pa);
+
+	/* Sanity check alignment and size */
+	BUG_ON((PAGE_OFFSET % PGDIR_SIZE) != 0);
+	BUG_ON((pa % (PAGE_SIZE * PTRS_PER_PTE)) != 0);
+
+#ifndef __PAGETABLE_PMD_FOLDED
+	trampoline_pg_dir[(PAGE_OFFSET >> PGDIR_SHIFT) % PTRS_PER_PGD] =
+		pfn_pgd(PFN_DOWN((uintptr_t)trampoline_pmd),
+			__pgprot(_PAGE_TABLE));
+	trampoline_pmd[0] = pfn_pmd(PFN_DOWN(pa), prot);
+
+	for (i = 0; i < (-PAGE_OFFSET)/PGDIR_SIZE; ++i) {
+		size_t o = (PAGE_OFFSET >> PGDIR_SHIFT) % PTRS_PER_PGD + i;
+		swapper_pg_dir[o] =
+			pfn_pgd(PFN_DOWN((uintptr_t)swapper_pmd) + i,
+				__pgprot(_PAGE_TABLE));
+	}
+	for (i = 0; i < ARRAY_SIZE(swapper_pmd); i++)
+		swapper_pmd[i] = pfn_pmd(PFN_DOWN(pa + i * PMD_SIZE), prot);
+#else
+	trampoline_pg_dir[(PAGE_OFFSET >> PGDIR_SHIFT) % PTRS_PER_PGD] =
+		pfn_pgd(PFN_DOWN(pa), prot);
+
+	for (i = 0; i < (-PAGE_OFFSET)/PGDIR_SIZE; ++i) {
+		size_t o = (PAGE_OFFSET >> PGDIR_SHIFT) % PTRS_PER_PGD + i;
+		swapper_pg_dir[o] =
+			pfn_pgd(PFN_DOWN(pa + i * PGDIR_SIZE), prot);
+	}
+#endif
 }
 
-
-static void __init parse_dtb(void)
+void __init sbi_save(unsigned int hartid, void *dtb)
 {
-	/* Early scan of device tree from init memory */
-	if (early_init_dt_scan(dtb_early_va))
-		return;
+	early_init_dt_scan(__va(dtb));
+}
 
-	pr_err("No DTB passed to the kernel\n");
-#ifdef CONFIG_CMDLINE_FORCE
-	strlcpy(boot_command_line, CONFIG_CMDLINE, COMMAND_LINE_SIZE);
-	pr_info("Forcing kernel command line to: %s\n", boot_command_line);
-#endif
+/*
+ * Allow the user to manually add a memory region (in case DTS is broken);
+ * "mem_end=nn[KkMmGg]"
+ */
+static int __init mem_end_override(char *p)
+{
+	resource_size_t base, end;
+
+	if (!p)
+		return -EINVAL;
+	base = (uintptr_t) __pa(PAGE_OFFSET);
+	end = memparse(p, &p) & PMD_MASK;
+	if (end == 0)
+		return -EINVAL;
+	memblock_add(base, end - base);
+	return 0;
+}
+early_param("mem_end", mem_end_override);
+
+static void __init setup_bootmem(void)
+{
+	struct memblock_region *reg;
+	phys_addr_t mem_size = 0;
+
+	/* Find the memory region containing the kernel */
+	for_each_memblock(memory, reg) {
+		phys_addr_t vmlinux_end = __pa(_end);
+		phys_addr_t end = reg->base + reg->size;
+
+		if (reg->base <= vmlinux_end && vmlinux_end <= end) {
+			/*
+			 * Reserve from the start of the region to the end of
+			 * the kernel
+			 */
+			memblock_reserve(reg->base, vmlinux_end - reg->base);
+			mem_size = min(reg->size, (phys_addr_t)-PAGE_OFFSET);
+		}
+	}
+	BUG_ON(mem_size == 0);
+
+	set_max_mapnr(PFN_DOWN(mem_size));
+	max_low_pfn = pfn_base + PFN_DOWN(mem_size);
+
+#ifdef CONFIG_BLK_DEV_INITRD
+	setup_initrd();
+#endif /* CONFIG_BLK_DEV_INITRD */
+
+	early_init_fdt_reserve_self();
+	early_init_fdt_scan_reserved_mem();
+	memblock_allow_resize();
+	memblock_dump_all();
 }
 
 void __init setup_arch(char **cmdline_p)
 {
-	parse_dtb();
+#ifdef CONFIG_CMDLINE_BOOL
+#ifdef CONFIG_CMDLINE_OVERRIDE
+	strlcpy(boot_command_line, builtin_cmdline, COMMAND_LINE_SIZE);
+#else
+	if (builtin_cmdline[0] != '\0') {
+		/* Append bootloader command line to built-in */
+		strlcat(builtin_cmdline, " ", COMMAND_LINE_SIZE);
+		strlcat(builtin_cmdline, boot_command_line, COMMAND_LINE_SIZE);
+		strlcpy(boot_command_line, builtin_cmdline, COMMAND_LINE_SIZE);
+	}
+#endif /* CONFIG_CMDLINE_OVERRIDE */
+#endif /* CONFIG_CMDLINE_BOOL */
+	*cmdline_p = boot_command_line;
+
+	parse_early_param();
+
 	init_mm.start_code = (unsigned long) _stext;
 	init_mm.end_code   = (unsigned long) _etext;
 	init_mm.end_data   = (unsigned long) _edata;
 	init_mm.brk        = (unsigned long) _end;
 
-	*cmdline_p = boot_command_line;
-
-	early_ioremap_setup();
-	jump_label_init();
-	parse_early_param();
-
-	efi_init();
 	setup_bootmem();
 	paging_init();
-	init_resources();
-#if IS_ENABLED(CONFIG_BUILTIN_DTB)
-	unflatten_and_copy_device_tree();
-#else
-	if (early_init_dt_verify(__va(dtb_early_pa)))
-		unflatten_device_tree();
-	else
-		pr_err("No DTB found in kernel mappings\n");
-#endif
-
-	if (IS_ENABLED(CONFIG_RISCV_SBI))
-		sbi_init();
-
-	if (IS_ENABLED(CONFIG_STRICT_KERNEL_RWX))
-		protect_kernel_text_data();
-#ifdef CONFIG_SWIOTLB
-	swiotlb_init(1);
-#endif
-
-#ifdef CONFIG_KASAN
-	kasan_init();
-#endif
+	unflatten_device_tree();
 
 #ifdef CONFIG_SMP
 	setup_smp();
 #endif
 
+#ifdef CONFIG_DUMMY_CONSOLE
+	conswitchp = &dummy_con;
+#endif
+
 	riscv_fill_hwcap();
 }
 
-static int __init topology_init(void)
+static int __init riscv_device_init(void)
 {
-	int i;
-
-	for_each_possible_cpu(i) {
-		struct cpu *cpu = &per_cpu(cpu_devices, i);
-
-		cpu->hotpluggable = cpu_has_hotplug(i);
-		register_cpu(cpu, i);
-	}
-
-	return 0;
+	return of_platform_populate(NULL, of_default_bus_match_table, NULL, NULL);
 }
-subsys_initcall(topology_init);
-
-void free_initmem(void)
-{
-	unsigned long init_begin = (unsigned long)__init_begin;
-	unsigned long init_end = (unsigned long)__init_end;
-
-	set_memory_rw_nx(init_begin, (init_end - init_begin) >> PAGE_SHIFT);
-	free_initmem_default(POISON_FREE_INITMEM);
-}
+subsys_initcall_sync(riscv_device_init);

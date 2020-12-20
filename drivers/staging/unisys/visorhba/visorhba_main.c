@@ -1,7 +1,17 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * Copyright (c) 2012 - 2015 UNISYS CORPORATION
  * All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or (at
+ * your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
+ * NON INFRINGEMENT.  See the GNU General Public License for more
+ * details.
  */
 
 #include <linux/debugfs.h>
@@ -9,12 +19,12 @@
 #include <linux/idr.h>
 #include <linux/module.h>
 #include <linux/seq_file.h>
-#include <linux/visorbus.h>
 #include <scsi/scsi.h>
 #include <scsi/scsi_host.h>
 #include <scsi/scsi_cmnd.h>
 #include <scsi/scsi_device.h>
 
+#include "visorbus.h"
 #include "iochannel.h"
 
 /* The Send and Receive Buffers of the IO Queue may both be full */
@@ -292,7 +302,7 @@ static void cleanup_scsitaskmgmt_handles(struct idr *idrtable,
  * @tasktype: Type of taskmgmt command
  * @scsidev:  Scsidev that issued command
  *
- * Create a cmdrsp packet and send it to the Service Partition
+ * Create a cmdrsp packet and send it to the Serivce Partition
  * that will service this request.
  *
  * Return: Int representing whether command was queued successfully or not
@@ -305,7 +315,7 @@ static int forward_taskmgmt_command(enum task_mgmt_types tasktype,
 		(struct visorhba_devdata *)scsidev->host->hostdata;
 	int notifyresult = 0xffff;
 	wait_queue_head_t notifyevent;
-	int scsicmd_id;
+	int scsicmd_id = 0;
 
 	if (devdata->serverdown || devdata->serverchangingstate)
 		return FAILED;
@@ -645,6 +655,7 @@ static struct scsi_host_template visorhba_driver_template = {
 	.this_id = -1,
 	.slave_alloc = visorhba_slave_alloc,
 	.slave_destroy = visorhba_slave_destroy,
+	.use_clustering = ENABLE_CLUSTERING,
 };
 
 /*
@@ -680,7 +691,19 @@ static int info_debugfs_show(struct seq_file *seq, void *v)
 
 	return 0;
 }
-DEFINE_SHOW_ATTRIBUTE(info_debugfs);
+
+static int info_debugfs_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, info_debugfs_show, inode->i_private);
+}
+
+static const struct file_operations info_debugfs_fops = {
+	.owner = THIS_MODULE,
+	.open = info_debugfs_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
 
 /*
  * complete_taskmgmt_command - Complete task management
@@ -852,7 +875,7 @@ static void do_scsi_nolinuxstat(struct uiscmdrsp *cmdrsp,
 		if (cmdrsp->scsi.no_disk_result == 0)
 			return;
 
-		buf = kzalloc(36, GFP_KERNEL);
+		buf = kzalloc(sizeof(char) * 36, GFP_KERNEL);
 		if (!buf)
 			return;
 
@@ -871,11 +894,12 @@ static void do_scsi_nolinuxstat(struct uiscmdrsp *cmdrsp,
 			return;
 		}
 
-		scsi_for_each_sg(scsicmd, sg, scsi_sg_count(scsicmd), i) {
-			this_page_orig = kmap_atomic(sg_page(sg));
+		sg = scsi_sglist(scsicmd);
+		for (i = 0; i < scsi_sg_count(scsicmd); i++) {
+			this_page_orig = kmap_atomic(sg_page(sg + i));
 			this_page = (void *)((unsigned long)this_page_orig |
-					     sg->offset);
-			memcpy(this_page, buf + bufind, sg->length);
+					     sg[i].offset);
+			memcpy(this_page, buf + bufind, sg[i].length);
 			kunmap_atomic(this_page_orig);
 		}
 		kfree(buf);
@@ -1186,7 +1210,7 @@ static struct visor_driver visorhba_driver = {
  */
 static int visorhba_init(void)
 {
-	int rc;
+	int rc = -ENOMEM;
 
 	visorhba_debugfs_dir = debugfs_create_dir("visorhba", NULL);
 	if (!visorhba_debugfs_dir)

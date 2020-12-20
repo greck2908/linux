@@ -814,7 +814,7 @@ static int octeon_irq_ciu_set_affinity(struct irq_data *data,
 			pen = &per_cpu(octeon_irq_ciu1_en_mirror, cpu);
 
 		if (cpumask_test_cpu(cpu, dest) && enable_one) {
-			enable_one = false;
+			enable_one = 0;
 			__set_bit(cd->bit, pen);
 		} else {
 			__clear_bit(cd->bit, pen);
@@ -1180,8 +1180,8 @@ static int octeon_irq_gpio_xlat(struct irq_domain *d,
 		type = IRQ_TYPE_LEVEL_LOW;
 		break;
 	default:
-		pr_err("Error: (%pOFn) Invalid irq trigger specification: %x\n",
-		       node,
+		pr_err("Error: (%s) Invalid irq trigger specification: %x\n",
+		       node->name,
 		       trigger);
 		type = IRQ_TYPE_LEVEL_LOW;
 		break;
@@ -1505,20 +1505,10 @@ static int __init octeon_irq_init_ciu(
 			goto err;
 	}
 
-	r = irq_alloc_desc_at(OCTEON_IRQ_MBOX0, -1);
-	if (r < 0) {
-		pr_err("Failed to allocate desc for %s\n", "OCTEON_IRQ_MBOX0");
-		goto err;
-	}
 	r = octeon_irq_set_ciu_mapping(
 		OCTEON_IRQ_MBOX0, 0, 32, 0, chip_mbox, handle_percpu_irq);
 	if (r)
 		goto err;
-	r = irq_alloc_desc_at(OCTEON_IRQ_MBOX1, -1);
-	if (r < 0) {
-		pr_err("Failed to allocate desc for %s\n", "OCTEON_IRQ_MBOX1");
-		goto err;
-	}
 	r = octeon_irq_set_ciu_mapping(
 		OCTEON_IRQ_MBOX1, 0, 33, 0, chip_mbox, handle_percpu_irq);
 	if (r)
@@ -1556,11 +1546,6 @@ static int __init octeon_irq_init_ciu(
 	if (r)
 		goto err;
 
-	r = irq_alloc_descs(OCTEON_IRQ_WDOG0, OCTEON_IRQ_WDOG0, 16, -1);
-	if (r < 0) {
-		pr_err("Failed to allocate desc for %s\n", "OCTEON_IRQ_WDOGx");
-		goto err;
-	}
 	/* CIU_1 */
 	for (i = 0; i < 16; i++) {
 		r = octeon_irq_set_ciu_mapping(
@@ -2208,15 +2193,12 @@ static int octeon_irq_cib_map(struct irq_domain *d,
 	struct octeon_irq_cib_chip_data *cd;
 
 	if (hw >= host_data->max_bits) {
-		pr_err("ERROR: %s mapping %u is too big!\n",
+		pr_err("ERROR: %s mapping %u is to big!\n",
 		       irq_domain_get_of_node(d)->name, (unsigned)hw);
 		return -EINVAL;
 	}
 
 	cd = kzalloc(sizeof(*cd), GFP_KERNEL);
-	if (!cd)
-		return -ENOMEM;
-
 	cd->host_data = host_data;
 	cd->bit = hw;
 
@@ -2289,19 +2271,17 @@ static int __init octeon_irq_init_cib(struct device_node *ciu_node,
 
 	parent_irq = irq_of_parse_and_map(ciu_node, 0);
 	if (!parent_irq) {
-		pr_err("ERROR: Couldn't acquire parent_irq for %pOFn\n",
-			ciu_node);
+		pr_err("ERROR: Couldn't acquire parent_irq for %s\n.",
+			ciu_node->name);
 		return -EINVAL;
 	}
 
 	host_data = kzalloc(sizeof(*host_data), GFP_KERNEL);
-	if (!host_data)
-		return -ENOMEM;
 	raw_spin_lock_init(&host_data->lock);
 
 	addr = of_get_address(ciu_node, 0, NULL, NULL);
 	if (!addr) {
-		pr_err("ERROR: Couldn't acquire reg(0) %pOFn\n", ciu_node);
+		pr_err("ERROR: Couldn't acquire reg(0) %s\n.", ciu_node->name);
 		return -EINVAL;
 	}
 	host_data->raw_reg = (u64)phys_to_virt(
@@ -2309,7 +2289,7 @@ static int __init octeon_irq_init_cib(struct device_node *ciu_node,
 
 	addr = of_get_address(ciu_node, 1, NULL, NULL);
 	if (!addr) {
-		pr_err("ERROR: Couldn't acquire reg(1) %pOFn\n", ciu_node);
+		pr_err("ERROR: Couldn't acquire reg(1) %s\n.", ciu_node->name);
 		return -EINVAL;
 	}
 	host_data->en_reg = (u64)phys_to_virt(
@@ -2317,8 +2297,8 @@ static int __init octeon_irq_init_cib(struct device_node *ciu_node,
 
 	r = of_property_read_u32(ciu_node, "cavium,max-bits", &val);
 	if (r) {
-		pr_err("ERROR: Couldn't read cavium,max-bits from %pOFn\n",
-			ciu_node);
+		pr_err("ERROR: Couldn't read cavium,max-bits from %s\n.",
+			ciu_node->name);
 		return r;
 	}
 	host_data->max_bits = val;
@@ -2327,7 +2307,7 @@ static int __init octeon_irq_init_cib(struct device_node *ciu_node,
 					   &octeon_irq_domain_cib_ops,
 					   host_data);
 	if (!cib_domain) {
-		pr_err("ERROR: Couldn't irq_domain_add_linear()\n");
+		pr_err("ERROR: Couldn't irq_domain_add_linear()\n.");
 		return -ENOMEM;
 	}
 
@@ -2501,8 +2481,8 @@ void octeon_irq_ciu3_mask_ack(struct irq_data *data)
 }
 
 #ifdef CONFIG_SMP
-static int octeon_irq_ciu3_set_affinity(struct irq_data *data,
-					const struct cpumask *dest, bool force)
+int octeon_irq_ciu3_set_affinity(struct irq_data *data,
+				 const struct cpumask *dest, bool force)
 {
 	union cvmx_ciu3_iscx_ctl isc_ctl;
 	union cvmx_ciu3_iscx_w1c isc_w1c;

@@ -1,8 +1,8 @@
 Davinci SPI controller device bindings
 
 Links on DM:
-Keystone 2 - https://www.ti.com/lit/ug/sprugp2a/sprugp2a.pdf
-dm644x - https://www.ti.com/lit/ug/sprue32a/sprue32a.pdf
+Keystone 2 - http://www.ti.com/lit/ug/sprugp2a/sprugp2a.pdf
+dm644x - http://www.ti.com/lit/ug/sprue32a/sprue32a.pdf
 OMAP-L138/da830 - http://www.ti.com/lit/ug/spruh77a/spruh77a.pdf
 
 Required properties:
@@ -68,7 +68,7 @@ SPI_SOMI/SIMO+-----------------+                           +-----------
 Example of a NOR flash slave device (n25q032) connected to DaVinci
 SPI controller device over the SPI bus.
 
-spi0:spi@20bf0000 {
+spi0:spi@20BF0000 {
 	#address-cells			= <1>;
 	#size-cells			= <0>;
 	compatible			= "ti,dm6446-spi";
