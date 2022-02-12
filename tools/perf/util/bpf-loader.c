@@ -29,6 +29,9 @@
 
 #include <internal/xyarray.h>
 
+/* temporarily disable libbpf deprecation warnings */
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
 static int libbpf_perf_print(enum libbpf_print_level level __attribute__((unused)),
 			      const char *fmt, va_list args)
 {
@@ -421,7 +424,7 @@ preproc_gen_prologue(struct bpf_program *prog, int n,
 	size_t prologue_cnt = 0;
 	int i, err;
 
-	if (IS_ERR(priv) || !priv || priv->is_tp)
+	if (IS_ERR_OR_NULL(priv) || priv->is_tp)
 		goto errout;
 
 	pev = &priv->pev;
@@ -570,7 +573,7 @@ static int hook_load_preprocessor(struct bpf_program *prog)
 	bool need_prologue = false;
 	int err, i;
 
-	if (IS_ERR(priv) || !priv) {
+	if (IS_ERR_OR_NULL(priv)) {
 		pr_debug("Internal error when hook preprocessor\n");
 		return -BPF_LOADER_ERRNO__INTERNAL;
 	}
@@ -642,8 +645,11 @@ int bpf__probe(struct bpf_object *obj)
 			goto out;
 
 		priv = bpf_program__priv(prog);
-		if (IS_ERR(priv) || !priv) {
-			err = PTR_ERR(priv);
+		if (IS_ERR_OR_NULL(priv)) {
+			if (!priv)
+				err = -BPF_LOADER_ERRNO__INTERNAL;
+			else
+				err = PTR_ERR(priv);
 			goto out;
 		}
 
@@ -671,7 +677,7 @@ int bpf__probe(struct bpf_object *obj)
 		 * After probing, let's consider prologue, which
 		 * adds program fetcher to BPF programs.
 		 *
-		 * hook_load_preprocessorr() hooks pre-processor
+		 * hook_load_preprocessor() hooks pre-processor
 		 * to bpf_program, let it generate prologue
 		 * dynamically during loading.
 		 */
@@ -693,7 +699,7 @@ int bpf__unprobe(struct bpf_object *obj)
 		struct bpf_prog_priv *priv = bpf_program__priv(prog);
 		int i;
 
-		if (IS_ERR(priv) || !priv || priv->is_tp)
+		if (IS_ERR_OR_NULL(priv) || priv->is_tp)
 			continue;
 
 		for (i = 0; i < priv->pev.ntevs; i++) {
@@ -751,7 +757,7 @@ int bpf__foreach_event(struct bpf_object *obj,
 		struct perf_probe_event *pev;
 		int i, fd;
 
-		if (IS_ERR(priv) || !priv) {
+		if (IS_ERR_OR_NULL(priv)) {
 			pr_debug("bpf: failed to get private field\n");
 			return -BPF_LOADER_ERRNO__INTERNAL;
 		}
@@ -1058,12 +1064,11 @@ __bpf_map__config_event(struct bpf_map *map,
 			struct parse_events_term *term,
 			struct evlist *evlist)
 {
-	struct evsel *evsel;
 	const struct bpf_map_def *def;
 	struct bpf_map_op *op;
 	const char *map_name = bpf_map__name(map);
+	struct evsel *evsel = evlist__find_evsel_by_str(evlist, term->val.str);
 
-	evsel = perf_evlist__find_evsel_by_str(evlist, term->val.str);
 	if (!evsel) {
 		pr_debug("Event (for '%s') '%s' doesn't exist\n",
 			 map_name, term->val.str);

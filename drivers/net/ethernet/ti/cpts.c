@@ -599,6 +599,7 @@ void cpts_unregister(struct cpts *cpts)
 
 	ptp_clock_unregister(cpts->clock);
 	cpts->clock = NULL;
+	cpts->phc_index = -1;
 
 	cpts_write32(cpts, 0, int_enable);
 	cpts_write32(cpts, 0, control);
@@ -668,10 +669,10 @@ static int cpts_of_mux_clk_setup(struct cpts *cpts, struct device_node *node)
 		goto mux_fail;
 	}
 
-	parent_names = devm_kzalloc(cpts->dev, (sizeof(char *) * num_parents),
-				    GFP_KERNEL);
+	parent_names = devm_kcalloc(cpts->dev, num_parents,
+				    sizeof(*parent_names), GFP_KERNEL);
 
-	mux_table = devm_kzalloc(cpts->dev, sizeof(*mux_table) * num_parents,
+	mux_table = devm_kcalloc(cpts->dev, num_parents, sizeof(*mux_table),
 				 GFP_KERNEL);
 	if (!mux_table || !parent_names) {
 		ret = -ENOMEM;
@@ -784,6 +785,7 @@ struct cpts *cpts_create(struct device *dev, void __iomem *regs,
 	cpts->cc.read = cpts_systim_read;
 	cpts->cc.mask = CLOCKSOURCE_MASK(32);
 	cpts->info = cpts_info;
+	cpts->phc_index = -1;
 
 	if (n_ext_ts)
 		cpts->info.n_ext_ts = n_ext_ts;

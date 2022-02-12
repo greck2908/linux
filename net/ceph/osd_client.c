@@ -5310,14 +5310,14 @@ void ceph_osdc_stop(struct ceph_osd_client *osdc)
 	ceph_msgpool_destroy(&osdc->msgpool_op_reply);
 }
 
-static int osd_req_op_copy_from_init(struct ceph_osd_request *req,
-				     u64 src_snapid, u64 src_version,
-				     struct ceph_object_id *src_oid,
-				     struct ceph_object_locator *src_oloc,
-				     u32 src_fadvise_flags,
-				     u32 dst_fadvise_flags,
-				     u32 truncate_seq, u64 truncate_size,
-				     u8 copy_from_flags)
+int osd_req_op_copy_from_init(struct ceph_osd_request *req,
+			      u64 src_snapid, u64 src_version,
+			      struct ceph_object_id *src_oid,
+			      struct ceph_object_locator *src_oloc,
+			      u32 src_fadvise_flags,
+			      u32 dst_fadvise_flags,
+			      u32 truncate_seq, u64 truncate_size,
+			      u8 copy_from_flags)
 {
 	struct ceph_osd_req_op *op;
 	struct page **pages;
@@ -5346,49 +5346,7 @@ static int osd_req_op_copy_from_init(struct ceph_osd_request *req,
 				 op->indata_len, 0, false, true);
 	return 0;
 }
-
-int ceph_osdc_copy_from(struct ceph_osd_client *osdc,
-			u64 src_snapid, u64 src_version,
-			struct ceph_object_id *src_oid,
-			struct ceph_object_locator *src_oloc,
-			u32 src_fadvise_flags,
-			struct ceph_object_id *dst_oid,
-			struct ceph_object_locator *dst_oloc,
-			u32 dst_fadvise_flags,
-			u32 truncate_seq, u64 truncate_size,
-			u8 copy_from_flags)
-{
-	struct ceph_osd_request *req;
-	int ret;
-
-	req = ceph_osdc_alloc_request(osdc, NULL, 1, false, GFP_KERNEL);
-	if (!req)
-		return -ENOMEM;
-
-	req->r_flags = CEPH_OSD_FLAG_WRITE;
-
-	ceph_oloc_copy(&req->r_t.base_oloc, dst_oloc);
-	ceph_oid_copy(&req->r_t.base_oid, dst_oid);
-
-	ret = osd_req_op_copy_from_init(req, src_snapid, src_version, src_oid,
-					src_oloc, src_fadvise_flags,
-					dst_fadvise_flags, truncate_seq,
-					truncate_size, copy_from_flags);
-	if (ret)
-		goto out;
-
-	ret = ceph_osdc_alloc_messages(req, GFP_KERNEL);
-	if (ret)
-		goto out;
-
-	ceph_osdc_start_request(osdc, req, false);
-	ret = ceph_osdc_wait_request(osdc, req);
-
-out:
-	ceph_osdc_put_request(req);
-	return ret;
-}
-EXPORT_SYMBOL(ceph_osdc_copy_from);
+EXPORT_SYMBOL(osd_req_op_copy_from_init);
 
 int __init ceph_osdc_setup(void)
 {
@@ -5412,7 +5370,7 @@ void ceph_osdc_cleanup(void)
 /*
  * handle incoming message
  */
-static void dispatch(struct ceph_connection *con, struct ceph_msg *msg)
+static void osd_dispatch(struct ceph_connection *con, struct ceph_msg *msg)
 {
 	struct ceph_osd *osd = con->private;
 	struct ceph_osd_client *osdc = osd->o_osdc;
@@ -5534,9 +5492,9 @@ static struct ceph_msg *alloc_msg_with_page_vector(struct ceph_msg_header *hdr)
 	return m;
 }
 
-static struct ceph_msg *alloc_msg(struct ceph_connection *con,
-				  struct ceph_msg_header *hdr,
-				  int *skip)
+static struct ceph_msg *osd_alloc_msg(struct ceph_connection *con,
+				      struct ceph_msg_header *hdr,
+				      int *skip)
 {
 	struct ceph_osd *osd = con->private;
 	int type = le16_to_cpu(hdr->type);
@@ -5560,7 +5518,7 @@ static struct ceph_msg *alloc_msg(struct ceph_connection *con,
 /*
  * Wrappers to refcount containing ceph_osd struct
  */
-static struct ceph_connection *get_osd_con(struct ceph_connection *con)
+static struct ceph_connection *osd_get_con(struct ceph_connection *con)
 {
 	struct ceph_osd *osd = con->private;
 	if (get_osd(osd))
@@ -5568,7 +5526,7 @@ static struct ceph_connection *get_osd_con(struct ceph_connection *con)
 	return NULL;
 }
 
-static void put_osd_con(struct ceph_connection *con)
+static void osd_put_con(struct ceph_connection *con)
 {
 	struct ceph_osd *osd = con->private;
 	put_osd(osd);
@@ -5582,8 +5540,8 @@ static void put_osd_con(struct ceph_connection *con)
  * Note: returned pointer is the address of a structure that's
  * managed separately.  Caller must *not* attempt to free it.
  */
-static struct ceph_auth_handshake *get_authorizer(struct ceph_connection *con,
-					int *proto, int force_new)
+static struct ceph_auth_handshake *
+osd_get_authorizer(struct ceph_connection *con, int *proto, int force_new)
 {
 	struct ceph_osd *o = con->private;
 	struct ceph_osd_client *osdc = o->o_osdc;
@@ -5599,7 +5557,7 @@ static struct ceph_auth_handshake *get_authorizer(struct ceph_connection *con,
 	return auth;
 }
 
-static int add_authorizer_challenge(struct ceph_connection *con,
+static int osd_add_authorizer_challenge(struct ceph_connection *con,
 				    void *challenge_buf, int challenge_buf_len)
 {
 	struct ceph_osd *o = con->private;
@@ -5610,7 +5568,7 @@ static int add_authorizer_challenge(struct ceph_connection *con,
 					    challenge_buf, challenge_buf_len);
 }
 
-static int verify_authorizer_reply(struct ceph_connection *con)
+static int osd_verify_authorizer_reply(struct ceph_connection *con)
 {
 	struct ceph_osd *o = con->private;
 	struct ceph_osd_client *osdc = o->o_osdc;
@@ -5622,7 +5580,7 @@ static int verify_authorizer_reply(struct ceph_connection *con)
 		NULL, NULL, NULL, NULL);
 }
 
-static int invalidate_authorizer(struct ceph_connection *con)
+static int osd_invalidate_authorizer(struct ceph_connection *con)
 {
 	struct ceph_osd *o = con->private;
 	struct ceph_osd_client *osdc = o->o_osdc;
@@ -5731,18 +5689,18 @@ static int osd_check_message_signature(struct ceph_msg *msg)
 }
 
 static const struct ceph_connection_operations osd_con_ops = {
-	.get = get_osd_con,
-	.put = put_osd_con,
-	.dispatch = dispatch,
-	.get_authorizer = get_authorizer,
-	.add_authorizer_challenge = add_authorizer_challenge,
-	.verify_authorizer_reply = verify_authorizer_reply,
-	.invalidate_authorizer = invalidate_authorizer,
-	.alloc_msg = alloc_msg,
+	.get = osd_get_con,
+	.put = osd_put_con,
+	.alloc_msg = osd_alloc_msg,
+	.dispatch = osd_dispatch,
+	.fault = osd_fault,
 	.reencode_message = osd_reencode_message,
+	.get_authorizer = osd_get_authorizer,
+	.add_authorizer_challenge = osd_add_authorizer_challenge,
+	.verify_authorizer_reply = osd_verify_authorizer_reply,
+	.invalidate_authorizer = osd_invalidate_authorizer,
 	.sign_message = osd_sign_message,
 	.check_message_signature = osd_check_message_signature,
-	.fault = osd_fault,
 	.get_auth_request = osd_get_auth_request,
 	.handle_auth_reply_more = osd_handle_auth_reply_more,
 	.handle_auth_done = osd_handle_auth_done,

@@ -25,11 +25,15 @@ config ATARI
 	  this kernel on an Atari, say Y here and browse the material
 	  available in <file:Documentation/m68k>; otherwise say N.
 
+config ATARI_KBD_CORE
+	bool
+
 config MAC
 	bool "Macintosh support"
 	depends on MMU
 	select MMU_MOTOROLA if MMU
 	select HAVE_ARCH_NVRAM_OPS
+	select HAVE_PATA_PLATFORM
 	select LEGACY_TIMER_TICK
 	help
 	  This option enables support for the Apple Macintosh series of
@@ -145,14 +149,13 @@ config SUN3
 
 	  If you don't want to compile a kernel exclusively for a Sun 3, say N.
 
-endif # M68KCLASSIC
-
 config PILOT
 	bool
 
 config PILOT3
 	bool "Pilot 1000/5000, PalmPilot Personal/Pro, or PalmIII support"
-	depends on M68328
+	depends on !MMU
+	select M68328
 	select PILOT
 	help
 	  Support for the Palm Pilot 1000/5000, Personal/Pro and PalmIII.
@@ -165,19 +168,22 @@ config XCOPILOT_BUGS
 
 config UCSIMM
 	bool "uCsimm module support"
-	depends on M68EZ328
+	depends on !MMU
+	select M68EZ328
 	help
 	  Support for the Arcturus Networks uCsimm module.
 
 config UCDIMM
 	bool "uDsimm module support"
-	depends on M68VZ328
+	depends on !MMU
+	select M68VZ328
 	help
 	  Support for the Arcturus Networks uDsimm module.
 
 config DRAGEN2
 	bool "DragenEngine II board support"
-	depends on M68VZ328
+	depends on !MMU
+	select M68VZ328
 	help
 	  Support for the DragenEngine II board.
 
@@ -197,8 +203,11 @@ config INIT_LCD
 config MEMORY_RESERVE
 	int "Memory reservation (MiB)"
 	depends on (UCSIMM || UCDIMM)
+	default 0
 	help
 	  Reserve certain memory regions on 68x328 based boards.
+
+endif # M68KCLASSIC
 
 config ARN5206
 	bool "Arnewsh 5206 board support"
@@ -457,6 +466,7 @@ config RAMKERNEL
 
 config ROMKERNEL
 	bool "ROM"
+	depends on ROM
 	help
 	  The kernel will be resident in FLASH/ROM when running. This is
 	  often referred to as Execute-in-Place (XIP), since the kernel
